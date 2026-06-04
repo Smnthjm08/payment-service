@@ -55,6 +55,44 @@ flowchart TB
 
 ## Core Domain Entities
 
+### API Key Authentication
+
+API keys identify a business and are the primary authentication mechanism for the public API.
+
+Recommended key format:
+
+- `dodo_live_<prefix>.<secret>`
+
+Security and storage choices:
+
+- Store the `prefix` in plaintext so the middleware can do a fast lookup.
+- Store only a SHA-256 hash of the full API key secret portion for verification.
+- Do not store or return the full raw API key after creation.
+
+Why this design:
+
+- A prefix lookup avoids scanning every key in the database on each request.
+- Hashing the full key means a database leak does not expose usable API keys.
+- Returning the key only once matches standard secret-handling behavior for tokens and webhook secrets.
+
+Transmission:
+
+- Clients send the key in the `Authorization: Bearer <api_key>` header.
+- The API key middleware extracts the prefix, loads the key record, hashes the presented key, and compares the hash before injecting the authenticated business into request context.
+- API keys MUST only be used over HTTPS.
+
+Revocation:
+
+- Revoke by marking the key inactive and setting a revocation timestamp.
+- Middleware must reject revoked or inactive keys even if the hash still matches.
+- Never delete keys immediately if auditability matters; retain the record for traceability and incident response.
+
+Operational guidance:
+
+- Show the full API key only once at creation time.
+- Allow merchants to list existing keys, but redact the secret value.
+- Prefer per-business key isolation so each merchant can rotate or revoke keys independently without affecting others.
+
 ### Business
 
 Represents a merchant using the platform.
@@ -124,6 +162,7 @@ Responsibilities:
 - Receive invoice and payment lifecycle events.
 
 Security notes:
+
 - Signing secret storage: the platform stores the webhook signing secret as a server-generated value (stored in plaintext in the database). This is acceptable because the secret is a system-generated HMAC secret (not a user password). Treat it as write-once/display-once: the secret SHOULD be returned to the merchant immediately after creation for copy-and-store, but MUST NOT be returned in API responses afterward.
 - API behaviour: when a merchant creates a webhook endpoint, return the secret once and then redact it from subsequent reads/updates. Optionally store only a hash for verification aids, but remember HMAC verification requires access to the raw secret when sending webhooks.
 

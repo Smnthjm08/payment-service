@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domains::enums::{InvoiceState, PaymentAttemptStatus};
+use crate::domains::enums::PaymentAttemptStatus;
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Business {
@@ -37,12 +37,12 @@ pub struct Customer {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Invoice {
     pub id: Uuid,
     pub business_id: Uuid,
     pub customer_id: Uuid,
-    pub state: InvoiceState,
+    pub state: String,
     pub total_amount_cents: i64,
     pub due_date: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -50,7 +50,7 @@ pub struct Invoice {
     pub paid_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct InvoiceLineItem {
     pub id: Uuid,
     pub invoice_id: Uuid,

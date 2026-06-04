@@ -42,10 +42,13 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(Data::new(AppState { db: pool.clone() }))
             .wrap(Logger::default())
-            .route("/api/health", web::get().to(manual_hello))
-            .service(handlers::businesses::businesses_scope())
-            .service(handlers::api_keys::api_keys_scope())
-            .service(handlers::customers::customers_scope())
+            .service(
+                web::scope("/api")
+                    .route("/health", web::get().to(manual_hello))
+                    .service(handlers::businesses::businesses_scope())
+                    .service(handlers::customers::customers_scope())
+                    .service(handlers::invoices::invoices_scope()),
+            )
     })
     .bind(&bind_addr)?
     .run();
