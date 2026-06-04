@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE idempotency_keys\n            SET\n                response_body = $2,\n                status_code   = $3\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "052a98e5aad5d2632aef75319f8c3b3869ac5046f355fa700ea0026d93bc9247"
+}

@@ -6,7 +6,33 @@ tests described below.
 
 ---
 
-## Quick start
+## Quick start (Docker — recommended)
+
+```bash
+docker compose up --build
+```
+
+That single command:
+1. Starts **Postgres** and waits until it is healthy.
+2. Runs all **sqlx migrations** via the `migrate` container.
+3. Starts the **mock-psp** on port `9090` and waits until it is healthy.
+4. Starts the **billing** API on port `8080`, pre-wired to Postgres and the mock-psp.
+
+Services are available at:
+- Billing API: `http://localhost:8080`
+- Mock PSP: `http://localhost:9090`
+- Postgres: `localhost:5432`
+
+To stop everything:
+
+```bash
+docker compose down          # keep the DB volume
+docker compose down -v       # wipe the DB too
+```
+
+---
+
+## Quick start (local / native)
 
 ```bash
 # copy and fill in secrets

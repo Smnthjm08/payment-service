@@ -42,6 +42,7 @@ pub fn invoices_scope() -> impl actix_web::dev::HttpServiceFactory {
         .route("", web::get().to(list_invoices))
         .route("/{id}", web::get().to(get_invoice))
         .route("/{id}/pay", web::post().to(pay_invoice))
+        .route("/{id}/finalize", web::post().to(finalize_invoice))
         .route("/{id}/void", web::post().to(void_invoice))
         .route("/{id}/mark_uncollectible", web::post().to(mark_uncollectible))
 }
@@ -567,6 +568,44 @@ pub async fn pay_invoice(
             .unwrap_or(actix_web::http::StatusCode::OK),
     )
     .json(json_value))
+}
+
+pub async fn finalize_invoice(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<impl Responder, Error> {
+    let auth = req
+        .extensions()
+        .get::<AuthenticatedBusiness>()
+        .cloned()
+        .ok_or_else(|| actix_web::error::ErrorUnauthorized("Unauthorized"))?;
+
+    let invoice_id = path.into_inner();
+    let invoice_repo = InvoiceRepository;
+
+    match invoice_repo
+        .transition_to_open_from_draft(&state.db, invoice_id, auth.business_id)
+        .await
+        .map_err(actix_web::error::ErrorInternalServerError)?
+    {
+        Some(invoice) => Ok(HttpResponse::Ok().json(invoice)),
+        None => {
+            let maybe = invoice_repo
+                .find_by_id(&state.db, invoice_id, auth.business_id)
+                .await
+                .map_err(actix_web::error::ErrorInternalServerError)?;
+
+            match maybe {
+                None => Err(actix_web::error::ErrorNotFound("Invoice not found")),
+                Some((inv, _)) => Err(actix_web::error::ErrorUnprocessableEntity(format!(
+                    "Cannot finalize an invoice in '{}' state. \
+                     Only invoices in 'Draft' state can be finalized (moved to 'Open').",
+                    inv.state
+                ))),
+            }
+        }
+    }
 }
 
 pub async fn void_invoice(

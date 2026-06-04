@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::domains::models::ApiKey;
@@ -8,7 +8,7 @@ pub struct ApiKeyRepository;
 impl ApiKeyRepository {
     pub async fn create_api_key(
         &self,
-        pool: &PgPool,
+        tx: &mut Transaction<'_, Postgres>,
         api_key_id: Uuid,
         business_id: Uuid,
         key_prefix: &str,
@@ -38,7 +38,7 @@ impl ApiKeyRepository {
             key_prefix,
             key_hash
         )
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await?;
 
         Ok(api_key)

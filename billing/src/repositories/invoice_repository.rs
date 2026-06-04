@@ -49,7 +49,7 @@ impl InvoiceRepository {
             invoice_id,
             business_id,
             customer_id,
-            "Open",
+            "Draft",
             total_amount_cents,
             due_date
         )
@@ -234,6 +234,40 @@ impl InvoiceRepository {
         Ok(results)
     }
 
+
+    pub async fn transition_to_open_from_draft(
+        &self,
+        pool: &PgPool,
+        invoice_id: Uuid,
+        business_id: Uuid,
+    ) -> Result<Option<Invoice>, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Open',
+                updated_at = NOW()
+            WHERE id          = $1
+              AND business_id = $2
+              AND state       = 'Draft'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+            business_id,
+        )
+        .fetch_optional(pool)
+        .await
+    }
 
     pub async fn transition_to_processing(
         &self,

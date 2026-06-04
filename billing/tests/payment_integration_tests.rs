@@ -12,6 +12,11 @@
 //! cargo test --test payment_integration_tests
 //! ```
 //!
+//! Run with output visible:
+//! ```
+//! cargo test --test payment_integration_tests -- --nocapture
+//! ```
+//!
 //! Three required tests
 //! --------------------
 //! 1. `test_concurrent_pay_only_one_succeeds`        — concurrency / double-charge
@@ -34,6 +39,43 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
+
+// ── Logging helpers ───────────────────────────────────────────────────────────
+
+/// Print a bold section header to stderr (visible with --nocapture).
+macro_rules! section {
+    ($title:expr) => {
+        eprintln!("\n\x1b[1;36m╔══ {} ══\x1b[0m", $title);
+    };
+}
+
+/// Print a labelled key/value pair.
+macro_rules! log_kv {
+    ($label:expr, $value:expr) => {
+        eprintln!("  \x1b[1;33m{:<22}\x1b[0m {}", concat!($label, ":"), $value);
+    };
+}
+
+/// Print a green PASS line.
+macro_rules! log_pass {
+    ($msg:expr) => {
+        eprintln!("  \x1b[1;32m✔  {}\x1b[0m", $msg);
+    };
+}
+
+/// Pretty-print a JSON value indented under the label.
+fn log_json(label: &str, value: &serde_json::Value) {
+    eprintln!(
+        "  \x1b[1;33m{:<22}\x1b[0m\n{}",
+        format!("{label}:"),
+        textwrap(serde_json::to_string_pretty(value).unwrap_or_default(), 4)
+    );
+}
+
+fn textwrap(s: String, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    s.lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
+}
 
 // ── Seed helpers ─────────────────────────────────────────────────────────────
 
@@ -266,13 +308,29 @@ async fn start_billing(pool: PgPool, psp_url: String) -> String {
 /// * Exactly **1** `payment_attempts` row has `status = 'Succeeded'`.
 #[sqlx::test(migrations = "../migrations")]
 async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
+    section!("TEST 1 — Concurrency: only one of N concurrent pays succeeds");
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+    section!("Fixtures");
     let psp_url = start_psp_success().await;
     let (business_id, api_key) = seed_business(&pool).await;
     let customer_id = seed_customer(&pool, business_id).await;
     let invoice_id = seed_open_invoice(&pool, business_id, customer_id).await;
-    let billing_url = start_billing(pool.clone(), psp_url).await;
+    let billing_url = start_billing(pool.clone(), psp_url.clone()).await;
 
+    log_kv!("billing_url", &billing_url);
+    log_kv!("psp_url (success)", &psp_url);
+    log_kv!("business_id", business_id);
+    log_kv!("customer_id", customer_id);
+    log_kv!("invoice_id", invoice_id);
+    log_kv!("api_key (prefix)", api_key.split('.').next().unwrap_or("?"));
+
+    // ── Fire N concurrent requests ────────────────────────────────────────────
     const N: usize = 10;
+    section!(format!("Firing {N} concurrent POST /invoices/{{id}}/pay"));
+    eprintln!("  card_token : tok_success");
+    eprintln!("  Each request uses a distinct Idempotency-Key (race-<invoice_id>-<i>)");
+
     let http = reqwest::Client::new();
 
     // Build all N futures before polling any, to maximise overlap.
@@ -289,29 +347,57 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
 
     let responses = join_all(futs).await;
 
+    // ── Tally results ─────────────────────────────────────────────────────────
+    section!("HTTP response tally");
     let mut success = 0usize;
     let mut unprocessable = 0usize;
-    for r in responses {
-        match r.expect("HTTP request failed").status().as_u16() {
-            200 => success += 1,
-            422 => unprocessable += 1,
-            other => panic!("unexpected HTTP status {other} from concurrent /pay"),
+    for (i, r) in responses.into_iter().enumerate() {
+        let resp = r.expect("HTTP request failed");
+        let status = resp.status().as_u16();
+        match status {
+            200 => {
+                success += 1;
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                eprintln!("  request #{i:>2}  →  \x1b[1;32m200 OK\x1b[0m  (winner)");
+                log_json("response body", &body);
+            }
+            422 => {
+                unprocessable += 1;
+                eprintln!("  request #{i:>2}  →  \x1b[1;33m422 Unprocessable\x1b[0m  (lost the race — correct)");
+            }
+            other => {
+                eprintln!("  request #{i:>2}  →  \x1b[1;31m{other} UNEXPECTED\x1b[0m");
+                panic!("unexpected HTTP status {other} from concurrent /pay");
+            }
         }
     }
 
+    eprintln!();
+    log_kv!("200 OK (winners)", success);
+    log_kv!("422 Unprocessable", unprocessable);
+    log_kv!("Total", success + unprocessable);
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    section!("Assertions");
+
     assert_eq!(success, 1, "exactly one concurrent payment must succeed");
+    log_pass!("Exactly 1 winner (200 OK)");
+
     assert_eq!(
         success + unprocessable,
         N,
         "all {N} requests must be 200 or 422 — none may 5xx or be silently lost"
     );
+    log_pass!(format!("All {N} responses accounted for (no 5xx, no silent loss)"));
 
     // DB: invoice must be Paid
     let inv = sqlx::query!("SELECT state FROM invoices WHERE id = $1", invoice_id)
         .fetch_one(&pool)
         .await
         .unwrap();
+    log_kv!("DB invoice.state", &inv.state);
     assert_eq!(inv.state, "Paid", "invoice must be Paid after the race");
+    log_pass!("Invoice state = Paid");
 
     // DB: exactly one Succeeded attempt — no double-charge
     let succeeded: i64 = sqlx::query_scalar!(
@@ -324,7 +410,11 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
     .unwrap()
     .unwrap_or(0);
 
+    log_kv!("DB Succeeded attempts", succeeded);
     assert_eq!(succeeded, 1, "exactly one Succeeded attempt must exist, got {succeeded}");
+    log_pass!("Exactly 1 Succeeded payment_attempt (no double-charge)");
+
+    eprintln!("\n\x1b[1;32m✔✔  TEST 1 PASSED\x1b[0m\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -341,13 +431,25 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
 /// * Exactly **1** row exists in `payment_attempts`.
 #[sqlx::test(migrations = "../migrations")]
 async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
+    section!("TEST 2 — Idempotency: replay returns cached response, PSP called once");
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+    section!("Fixtures");
     let (psp_url, call_count) = start_psp_counting().await;
     let (business_id, api_key) = seed_business(&pool).await;
     let customer_id = seed_customer(&pool, business_id).await;
     let invoice_id = seed_open_invoice(&pool, business_id, customer_id).await;
-    let billing_url = start_billing(pool.clone(), psp_url).await;
-
+    let billing_url = start_billing(pool.clone(), psp_url.clone()).await;
     let idem_key = format!("idem-{}", Uuid::new_v4());
+
+    log_kv!("billing_url", &billing_url);
+    log_kv!("psp_url (counting)", &psp_url);
+    log_kv!("business_id", business_id);
+    log_kv!("customer_id", customer_id);
+    log_kv!("invoice_id", invoice_id);
+    log_kv!("idempotency_key", &idem_key);
+    log_kv!("card_token", "tok_success");
+
     let http = reqwest::Client::new();
 
     let build_req = || {
@@ -357,26 +459,53 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
             .json(&serde_json::json!({"card_token": "tok_success"}))
     };
 
-    // ── First request ──────────────────────────────────────────────────────
+    // ── First request ─────────────────────────────────────────────────────────
+    section!("First request  →  expected 200 (live PSP call)");
     let resp1 = build_req().send().await.unwrap();
-    assert_eq!(resp1.status().as_u16(), 200, "first request must succeed");
+    let status1 = resp1.status().as_u16();
+    eprintln!("  HTTP status : {status1}");
+    assert_eq!(status1, 200, "first request must succeed");
+    log_pass!("200 OK");
+
     let body1: serde_json::Value = resp1.json().await.unwrap();
+    log_json("response body", &body1);
 
-    // ── Second request (replay) ────────────────────────────────────────────
+    let psp_calls_after_first = call_count.load(Ordering::SeqCst);
+    log_kv!("PSP /charge calls", psp_calls_after_first);
+    assert_eq!(psp_calls_after_first, 1, "first request must trigger exactly one PSP call");
+    log_pass!("PSP called once after first request");
+
+    // ── Second request (replay) ───────────────────────────────────────────────
+    section!("Second request (same Idempotency-Key)  →  expected 200 from cache");
     let resp2 = build_req().send().await.unwrap();
-    assert_eq!(resp2.status().as_u16(), 200, "replay must return 200");
+    let status2 = resp2.status().as_u16();
+    eprintln!("  HTTP status : {status2}");
+    assert_eq!(status2, 200, "replay must return 200");
+    log_pass!("200 OK");
+
     let body2: serde_json::Value = resp2.json().await.unwrap();
+    log_json("response body (replay)", &body2);
 
+    // ── Assertions ────────────────────────────────────────────────────────────
+    section!("Assertions");
+
+    // Bodies must be byte-for-byte identical
+    let bodies_match = body1 == body2;
+    log_kv!("Bodies identical", bodies_match);
     assert_eq!(body1, body2, "idempotent replay must return an identical response body");
+    log_pass!("Response bodies are identical (byte-for-byte JSON match)");
 
-    // PSP was called once — the second request must be served from the cache.
+    // PSP must have been called exactly once total
+    let total_psp_calls = call_count.load(Ordering::SeqCst);
+    log_kv!("Total PSP /charge calls", total_psp_calls);
     assert_eq!(
-        call_count.load(Ordering::SeqCst),
+        total_psp_calls,
         1,
         "PSP must be called exactly once; idempotency replay must not reach PSP"
     );
+    log_pass!("PSP called exactly once (replay served from cache)");
 
-    // Only one payment attempt in the DB.
+    // Only one payment attempt in the DB
     let attempts: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*) FROM payment_attempts WHERE invoice_id = $1",
         invoice_id
@@ -386,7 +515,11 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
     .unwrap()
     .unwrap_or(0);
 
+    log_kv!("DB payment_attempts count", attempts);
     assert_eq!(attempts, 1, "exactly one payment_attempt must exist after replay");
+    log_pass!("Exactly 1 payment_attempt row (no duplicate created)");
+
+    eprintln!("\n\x1b[1;32m✔✔  TEST 2 PASSED\x1b[0m\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -406,11 +539,23 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
 /// * The `payment_attempts` row has `status = 'TimedOut'`.
 #[sqlx::test(migrations = "../migrations")]
 async fn test_psp_timeout_invoice_not_stuck_in_processing(pool: PgPool) {
+    section!("TEST 3a — PSP timeout: invoice rolls back to Open, attempt = TimedOut");
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+    section!("Fixtures");
     let psp_url = start_psp_timeout().await;
     let (business_id, api_key) = seed_business(&pool).await;
     let customer_id = seed_customer(&pool, business_id).await;
     let invoice_id = seed_open_invoice(&pool, business_id, customer_id).await;
-    let billing_url = start_billing(pool.clone(), psp_url).await;
+    let billing_url = start_billing(pool.clone(), psp_url.clone()).await;
+
+    log_kv!("billing_url", &billing_url);
+    log_kv!("psp_url (timeout=35s)", &psp_url);
+    log_kv!("billing PSP timeout", "10 s");
+    log_kv!("business_id", business_id);
+    log_kv!("customer_id", customer_id);
+    log_kv!("invoice_id", invoice_id);
+    log_kv!("card_token", "tok_timeout");
 
     // Test-level timeout is longer than billing's 10 s PSP timeout.
     let http = reqwest::Client::builder()
@@ -418,42 +563,62 @@ async fn test_psp_timeout_invoice_not_stuck_in_processing(pool: PgPool) {
         .build()
         .unwrap();
 
+    let idem_key = format!("timeout-{}", Uuid::new_v4());
+    log_kv!("idempotency_key", &idem_key);
+
+    // ── Send pay request ──────────────────────────────────────────────────────
+    section!("POST /invoices/{id}/pay  (expect ~10s wait, then 402)");
+    eprintln!("  \x1b[2m[waiting for billing to hit its 10s PSP timeout…]\x1b[0m");
+
     let resp = http
         .post(format!("{}/api/invoices/{}/pay", billing_url, invoice_id))
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("Idempotency-Key", format!("timeout-{}", Uuid::new_v4()))
+        .header("Idempotency-Key", idem_key)
         .json(&serde_json::json!({"card_token": "tok_timeout"}))
         .send()
         .await
         .expect("test HTTP client must not time out before billing does");
 
-    assert_eq!(
-        resp.status().as_u16(),
-        402,
-        "PSP timeout must yield 402 Payment Required"
-    );
+    let status = resp.status().as_u16();
+    eprintln!("  HTTP status : {status}");
+
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    log_json("response body", &body);
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    section!("Assertions");
+
+    assert_eq!(status, 402, "PSP timeout must yield 402 Payment Required");
+    log_pass!("402 Payment Required");
 
     // Invoice must NOT be stuck in Processing.
     let inv = sqlx::query!("SELECT state FROM invoices WHERE id = $1", invoice_id)
         .fetch_one(&pool)
         .await
         .unwrap();
+    log_kv!("DB invoice.state", &inv.state);
     assert_eq!(
         inv.state, "Open",
         "invoice must return to Open after PSP timeout — found '{}' instead",
         inv.state
     );
+    log_pass!("Invoice rolled back to Open (NOT stuck in Processing)");
 
     // Attempt must be recorded as TimedOut.
     let attempt = sqlx::query!(
-        "SELECT status FROM payment_attempts \
+        "SELECT status, failure_code FROM payment_attempts \
          WHERE invoice_id = $1 ORDER BY created_at DESC LIMIT 1",
         invoice_id
     )
     .fetch_one(&pool)
     .await
     .unwrap();
+    log_kv!("DB attempt.status", &attempt.status);
+    log_kv!("DB attempt.failure_code", attempt.failure_code.as_deref().unwrap_or("null"));
     assert_eq!(attempt.status, "TimedOut", "attempt must be marked TimedOut");
+    log_pass!("payment_attempt.status = TimedOut");
+
+    eprintln!("\n\x1b[1;32m✔✔  TEST 3a PASSED\x1b[0m\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -469,44 +634,74 @@ async fn test_psp_timeout_invoice_not_stuck_in_processing(pool: PgPool) {
 /// * The `payment_attempts` row has `status = 'Error'`.
 #[sqlx::test(migrations = "../migrations")]
 async fn test_psp_network_error_invoice_returns_to_open(pool: PgPool) {
+    section!("TEST 3b — PSP HTTP-500: invoice rolls back to Open, attempt = Error");
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+    section!("Fixtures");
     let psp_url = start_psp_error().await;
     let (business_id, api_key) = seed_business(&pool).await;
     let customer_id = seed_customer(&pool, business_id).await;
     let invoice_id = seed_open_invoice(&pool, business_id, customer_id).await;
-    let billing_url = start_billing(pool.clone(), psp_url).await;
+    let billing_url = start_billing(pool.clone(), psp_url.clone()).await;
+
+    log_kv!("billing_url", &billing_url);
+    log_kv!("psp_url (returns 500)", &psp_url);
+    log_kv!("business_id", business_id);
+    log_kv!("customer_id", customer_id);
+    log_kv!("invoice_id", invoice_id);
+    log_kv!("card_token", "tok_network_error");
+
+    let idem_key = format!("neterr-{}", Uuid::new_v4());
+    log_kv!("idempotency_key", &idem_key);
+
+    // ── Send pay request ──────────────────────────────────────────────────────
+    section!("POST /invoices/{id}/pay  (expect immediate 402 — PSP returns 500)");
 
     let http = reqwest::Client::new();
     let resp = http
         .post(format!("{}/api/invoices/{}/pay", billing_url, invoice_id))
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("Idempotency-Key", format!("neterr-{}", Uuid::new_v4()))
+        .header("Idempotency-Key", idem_key)
         .json(&serde_json::json!({"card_token": "tok_network_error"}))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(
-        resp.status().as_u16(),
-        402,
-        "PSP 500 must yield 402 Payment Required"
-    );
+    let status = resp.status().as_u16();
+    eprintln!("  HTTP status : {status}");
+
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    log_json("response body", &body);
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    section!("Assertions");
+
+    assert_eq!(status, 402, "PSP 500 must yield 402 Payment Required");
+    log_pass!("402 Payment Required");
 
     let inv = sqlx::query!("SELECT state FROM invoices WHERE id = $1", invoice_id)
         .fetch_one(&pool)
         .await
         .unwrap();
+    log_kv!("DB invoice.state", &inv.state);
     assert_eq!(
         inv.state, "Open",
         "invoice must return to Open after gateway error"
     );
+    log_pass!("Invoice rolled back to Open");
 
     let attempt = sqlx::query!(
-        "SELECT status FROM payment_attempts \
+        "SELECT status, failure_code FROM payment_attempts \
          WHERE invoice_id = $1 ORDER BY created_at DESC LIMIT 1",
         invoice_id
     )
     .fetch_one(&pool)
     .await
     .unwrap();
+    log_kv!("DB attempt.status", &attempt.status);
+    log_kv!("DB attempt.failure_code", attempt.failure_code.as_deref().unwrap_or("null"));
     assert_eq!(attempt.status, "Error", "attempt must be marked Error");
+    log_pass!("payment_attempt.status = Error");
+
+    eprintln!("\n\x1b[1;32m✔✔  TEST 3b PASSED\x1b[0m\n");
 }

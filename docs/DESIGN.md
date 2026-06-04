@@ -1,288 +1,516 @@
-# Invoice & Payment Service
+# Payment Service Architecture & Design
 
 ## Overview
 
-This service enables businesses (merchants) to:
+This project implements a multi-tenant Invoice & Payment Service built using Rust (Actix Web), PostgreSQL, and SQLx. Businesses create customers and invoices, customers pay invoices through a mock Payment Service Provider (PSP), and businesses receive lifecycle notifications through webhooks.
 
-- Create and manage customers.
-- Create invoices for customers.
-- Process invoice payments through an external Payment Service Provider (PSP).
-- Receive webhook notifications for invoice and payment events.
-
-The system treats the PSP as an external dependency and is responsible for maintaining invoice state, payment attempt state, and webhook delivery reliability.
+The design prioritizes correctness over feature breadth. Particular attention is paid to payment idempotency, invoice state transitions, tenant isolation, and failure handling when communicating with external systems.
 
 ---
 
-## High Level Architecture
+# 1. Data Model
 
-```mermaid
-flowchart TB
+## Entity Relationship Overview
 
-    Merchant["Merchant / Business"]
-
-    subgraph InvoiceService["Invoice & Payment Service"]
-        API["API Layer"]
-
-        PaymentOrchestrator["Payment Orchestrator"]
-
-        WebhookDispatcher["Webhook Dispatcher"]
-    end
-
-    Postgres[("PostgreSQL")]
-
-    MockPSP["Mock PSP"]
-
-    MerchantWebhook["Merchant Webhook Endpoint"]
-
-    Merchant -->|"API Key Auth"| API
-
-    API --> PaymentOrchestrator
-
-    PaymentOrchestrator -->|"Read / Write"| Postgres
-
-    PaymentOrchestrator -->|"HTTP Request"| MockPSP
-
-    MockPSP -->|"Success / Failure / Timeout"| PaymentOrchestrator
-
-    PaymentOrchestrator -->|"Persist Event"| Postgres
-
-    WebhookDispatcher -->|"Poll Events"| Postgres
-
-    WebhookDispatcher -->|"Deliver Webhook"| MerchantWebhook
-```
+Business
+├── ApiKeys
+├── Customers
+├── Invoices
+│ ├── InvoiceLineItems
+│ └── PaymentAttempts
+├── WebhookEndpoints
+│ └── WebhookDeliveries
+└── IdempotencyKeys
 
 ---
 
-## Core Domain Entities
+## businesses
 
-### API Key Authentication
+Purpose:
+Represents a tenant of the platform.
 
-API keys identify a business and are the primary authentication mechanism for the public API.
+Key fields:
 
-Recommended key format:
+- id (UUID PK)
+- email
+- name
+- is_active
 
-- `dodo_live_<prefix>.<secret>`
+Indexes:
 
-Security and storage choices:
+- PRIMARY KEY(id)
+- UNIQUE(email)
 
-- Store the `prefix` in plaintext so the middleware can do a fast lookup.
-- Store only a SHA-256 hash of the full API key secret portion for verification.
-- Do not store or return the full raw API key after creation.
+Why:
 
-Why this design:
+Businesses own all other resources. Every customer, invoice, payment attempt, webhook endpoint, and idempotency key is scoped to a business.
 
-- A prefix lookup avoids scanning every key in the database on each request.
-- Hashing the full key means a database leak does not expose usable API keys.
-- Returning the key only once matches standard secret-handling behavior for tokens and webhook secrets.
+100x Scale:
 
-Transmission:
-
-- Clients send the key in the `Authorization: Bearer <api_key>` header.
-- The API key middleware extracts the prefix, loads the key record, hashes the presented key, and compares the hash before injecting the authenticated business into request context.
-- API keys MUST only be used over HTTPS.
-
-Revocation:
-
-- Revoke by marking the key inactive and setting a revocation timestamp.
-- Middleware must reject revoked or inactive keys even if the hash still matches.
-- Never delete keys immediately if auditability matters; retain the record for traceability and incident response.
-
-Operational guidance:
-
-- Show the full API key only once at creation time.
-- Allow merchants to list existing keys, but redact the secret value.
-- Prefer per-business key isolation so each merchant can rotate or revoke keys independently without affecting others.
-
-### Business
-
-Represents a merchant using the platform.
-
-Responsibilities:
-
-- Own customers.
-- Own invoices.
-- Own webhook endpoints.
-- Authenticate using API keys.
+Move to UUIDv7 and potentially shard by business_id.
 
 ---
 
-### Customer
+## api_keys
 
-Represents an end customer belonging to a business.
+Purpose:
 
-Responsibilities:
+Server-to-server authentication.
 
-- Receive invoices.
-- Make payments.
+Key fields:
+
+- business_id
+- key_prefix
+- key_hash
+- revoked_at
+
+Indexes:
+
+- UNIQUE(key_prefix)
+- INDEX(business_id)
+
+Why hash + prefix:
+
+The prefix allows efficient lookup without scanning all keys. Only the SHA-256 hash is stored, so leaked database contents do not reveal active API keys.
+
+100x Scale:
+
+Move hashes into a dedicated authentication service or cache frequently accessed prefixes in Redis.
 
 ---
 
-### Invoice
+## customers
+
+Purpose:
+
+Represents invoice recipients.
+
+Key fields:
+
+- business_id
+- name
+- email
+- phone
+
+Indexes:
+
+- UNIQUE(business_id, email)
+- INDEX(business_id)
+
+Why:
+
+Customer emails are unique only within a business. Different businesses may have customers with the same email.
+
+---
+
+## invoices
+
+Purpose:
 
 Represents a bill issued to a customer.
 
-Responsibilities:
+Key fields:
 
-- Track invoice amount.
-- Track invoice state.
-- Maintain payment history through payment attempts.
+- customer_id
+- state
+- total_amount_cents
+- due_date
 
----
+Indexes:
 
-### Invoice Line Item
+- business_id
+- customer_id
+- state
 
-Represents a billable item within an invoice.
+Why store total_amount_cents:
 
-Responsibilities:
+The server computes totals from line items once and stores them. This avoids repeatedly calculating totals during payment flows.
 
-- Description
-- Quantity
-- Unit price
-
----
-
-### Payment Attempt
-
-Represents a single attempt to collect payment for an invoice.
-
-Responsibilities:
-
-- Track PSP interaction.
-- Track payment outcome.
-- Maintain PSP reference identifiers.
+Money is stored as integer cents. Floats are never used.
 
 ---
 
-### Webhook Endpoint
+## invoice_line_items
 
-Represents a merchant-owned endpoint that receives event notifications.
+Purpose:
 
-Responsibilities:
+Stores invoice contents.
 
-- Receive invoice and payment lifecycle events.
+Key fields:
 
-Security notes:
+- invoice_id
+- description
+- quantity
+- unit_amount_cents
 
-- Signing secret storage: the platform stores the webhook signing secret as a server-generated value (stored in plaintext in the database). This is acceptable because the secret is a system-generated HMAC secret (not a user password). Treat it as write-once/display-once: the secret SHOULD be returned to the merchant immediately after creation for copy-and-store, but MUST NOT be returned in API responses afterward.
-- API behaviour: when a merchant creates a webhook endpoint, return the secret once and then redact it from subsequent reads/updates. Optionally store only a hash for verification aids, but remember HMAC verification requires access to the raw secret when sending webhooks.
+Why:
 
----
-
-### Webhook Delivery
-
-Represents an individual webhook delivery attempt.
-
-Responsibilities:
-
-- Track delivery status.
-- Track retries and failures.
+Line items are normalized for flexibility while invoice totals remain denormalized for performance.
 
 ---
 
-## Invoice State Machine
+## payment_attempts
 
-### State Diagram
+Purpose:
+
+Immutable audit log of payment processing attempts.
+
+Key fields:
+
+- invoice_id
+- status
+- amount_cents
+- card_token
+- psp_ref
+- failure_code
+
+Statuses:
+
+- Pending
+- Succeeded
+- Failed
+- TimedOut
+- Error
+
+Why:
+
+Every interaction with the PSP is preserved for debugging, auditing, and reconciliation.
+
+100x Scale:
+
+Partition by created_at month.
+
+---
+
+## webhook_endpoints
+
+Purpose:
+
+Stores merchant webhook destinations.
+
+Key fields:
+
+- business_id
+- url
+- secret
+
+Why:
+
+Each business may subscribe to events independently.
+
+---
+
+## webhook_deliveries
+
+Purpose:
+
+Outbox table for webhook delivery.
+
+Key fields:
+
+- endpoint_id
+- invoice_id
+- event_type
+- status
+- next_retry_at
+
+Why:
+
+Webhook delivery is decoupled from API requests.
+
+---
+
+## idempotency_keys
+
+Purpose:
+
+Prevents duplicate payment processing.
+
+Key fields:
+
+- business_id
+- key
+- request_hash
+- response_body
+- expires_at
+
+Indexes:
+
+- UNIQUE(business_id, key)
+
+Why:
+
+Guarantees retries return the same result without issuing additional PSP calls.
+
+---
+
+# 2. Invoice State Machine
 
 ```mermaid
 stateDiagram-v2
-    direction LR
+    [*] --> Draft
 
-    [*] --> Open : POST /invoices (created)
+    Draft --> Open : Finalize
 
-    Open --> Processing  : POST /invoices/{id}/pay\n(payment attempt started)
-    Open --> Void        : POST /invoices/{id}/void\n(merchant cancels)
-    Open --> Uncollectible : POST /invoices/{id}/mark_uncollectible\n(written off as bad debt)
+    Open --> Processing : Start Payment
 
-    Processing --> Paid  : PSP returns succeeded
-    Processing --> Open  : PSP returns failed / timed out / error\n(retryable — rolled back)
+    Processing --> Paid : PSP Success
 
-    Paid          --> [*] : terminal
-    Void          --> [*] : terminal
-    Uncollectible --> [*] : terminal
+    Processing --> Open : PSP Failure
+
+    Open --> Void : Manual Void
+
+    Open --> Uncollectible : Write Off
+
+    Paid --> [*]
+    Void --> [*]
+    Uncollectible --> [*]
 ```
 
-### State Definitions
+Terminal States:
 
-| State | Description | Terminal? |
-|-------|-------------|----------|
-| `Open` | Invoice has been created and issued to the customer. Awaiting payment. | No |
-| `Processing` | A payment attempt is in-flight. Prevents concurrent double-charges. | No |
-| `Paid` | Full payment was successfully received. | **Yes** |
-| `Void` | Invoice was cancelled by the merchant before payment. | **Yes** |
-| `Uncollectible` | Invoice written off as bad debt by the merchant. | **Yes** |
+- Paid
+- Void
+- Uncollectible
 
-> **Note:** The `Draft` state is reserved for future use (e.g. multi-step invoice building). All invoices created via the API today start directly in `Open`.
+Valid Transitions:
 
-### Valid Transitions
+| From       | To            | Trigger         |
+| ---------- | ------------- | --------------- |
+| Draft      | Open          | Finalize        |
+| Open       | Processing    | Payment Start   |
+| Processing | Paid          | PSP Success     |
+| Processing | Open          | PSP Failure     |
+| Open       | Void          | Merchant Action |
+| Open       | Uncollectible | Merchant Action |
 
-| From | To | Trigger | API endpoint |
-|------|----|---------|-------------|
-| `Open` | `Processing` | Payment attempt started | `POST /invoices/{id}/pay` |
-| `Open` | `Void` | Merchant cancels | `POST /invoices/{id}/void` |
-| `Open` | `Uncollectible` | Written off | `POST /invoices/{id}/mark_uncollectible` |
-| `Processing` | `Paid` | PSP returns `succeeded` | Internal (PSP callback) |
-| `Processing` | `Open` | PSP returns `failed`, `timed out`, or `error` | Internal (PSP callback) |
+Invalid transitions are rejected using state-conditional updates:
 
-### Invalid Transitions (rejected at API level)
+```sql
+UPDATE invoices
+SET state='Processing'
+WHERE id=$1
+AND state='Open'
+```
 
-Any transition not listed above is rejected with `422 Unprocessable Entity` and an error body that names the current state and explains which transitions are valid. Examples:
-
-- Trying to `void` a `Paid` invoice → `422: Cannot void an invoice in 'Paid' state. Only invoices in 'Open' state can be voided.`
-- Trying to `pay` a `Void` invoice → `422: Invoice not found or is not in the Open state.`
-- Trying to `pay` a `Processing` invoice → `409 Conflict: A payment with this Idempotency-Key is already in progress.`
+If no rows are updated, the transition is invalid.
 
 ---
 
-## Payment Attempt Lifecycle
+# 3. Payment Correctness & Failure Modes
 
-- Pending
-  - Payment attempt has been created.
-  - PSP request is in-flight.
+## (a) Two clients call POST /pay simultaneously
 
-- Succeeded
-  - PSP returned `{ status: "succeeded" }`.
-  - Terminal state.
+Only one request successfully transitions:
 
-- Failed
-  - PSP returned `{ status: "failed", code: "..." }`.
-  - Examples: `insufficient_funds`, `card_declined`
-  - Terminal state.
+Open → Processing
 
-- TimedOut
-  - PSP request exceeded the 10-second timeout threshold.
-  - Payment outcome is unknown; invoice is rolled back to `Open` for retry.
-  - Terminal state.
+using an atomic conditional update.
 
-- Error
-  - Network failure or PSP internal error (HTTP 500 / connection drop).
-  - Invoice is rolled back to `Open` for retry.
-  - Terminal state.
+The winner proceeds to the PSP.
 
-## PSP Token Behaviour
+All others receive:
 
-| Token | Behaviour | Response |
-|-------|-----------|----------|
-| `tok_success` | ~100 ms delay, then success | `{ "status": "succeeded", "psp_ref": "<uuid>" }` |
-| `tok_insufficient_funds` | ~100 ms delay, then decline | `{ "status": "failed", "code": "insufficient_funds" }` |
-| `tok_card_declined` | ~100 ms delay, then decline | `{ "status": "failed", "code": "card_declined" }` |
-| `tok_timeout` | Sleeps 30 s, then success | Billing service times out after 10 s → `TimedOut` |
-| `tok_network_error` | Returns HTTP 500 immediately | `{ "error": "gateway_error" }` → `GatewayError` |
+409 Conflict
 
-Handling `tok_timeout` and `tok_network_error` is a key evaluation point:
-- The billing service enforces a **10-second HTTP timeout** on all PSP calls.
-- On timeout: attempt is marked `TimedOut`, invoice rolls back to `Open`.
-- On network error: attempt is marked `Error`, invoice rolls back to `Open`.
-- In both cases the invoice is safe to retry with a new `Idempotency-Key`.
+No duplicate PSP calls occur.
+
+Chosen mechanism:
+
+State-conditional update.
+
+Why:
+
+Simpler than advisory locks while still preventing double charges.
 
 ---
 
-## Schema Design
+## (b) PSP timeout (tok_timeout)
 
-Primary Key Strategy
+The billing service uses a 10-second outbound timeout.
 
-- UUIDv7 for all entities.
-- Avoids predictable IDs.
-- Better index locality than UUIDv4.
-- Suitable for distributed systems.
+If exceeded:
 
-![db-schema](./images/schema.png)
+- PaymentAttempt = TimedOut
+- Invoice returns to Open
+
+The caller receives an error response.
+
+The invoice remains payable.
+
+---
+
+## (c) PSP success but service crashes before persistence
+
+The PSP reference (psp_ref) is stored on successful completion.
+
+If the request is retried:
+
+- Existing payment attempts are checked.
+- Idempotency cache is checked.
+
+The operation is treated as already completed.
+
+No second charge is created.
+
+---
+
+## (d) Idempotency key reused with different request body
+
+Stored request_hash is compared against the incoming request hash.
+
+If different:
+
+409 Conflict
+
+This prevents clients from accidentally mutating requests under an existing idempotency key.
+
+---
+
+## (e) Paying an already-paid invoice
+
+Paid is terminal.
+
+Any additional payment request receives:
+
+422 Unprocessable Entity
+
+No PSP call is made.
+
+---
+
+# 4. Webhook Design
+
+## Events
+
+- invoice.created
+- invoice.paid
+- invoice.payment_failed
+
+## Signing
+
+Algorithm:
+
+HMAC-SHA256
+
+Headers:
+
+X-Dodo-Signature
+X-Dodo-Timestamp
+
+Signed payload:
+
+timestamp + request body
+
+Replay protection:
+
+Receivers reject timestamps older than 5 minutes.
+
+---
+
+## Retry Policy
+
+Attempt 1: Immediate
+
+Attempt 2: 1 minute
+
+Attempt 3: 5 minutes
+
+Attempt 4: 15 minutes
+
+Attempt 5: 1 hour
+
+Attempt 6: 6 hours
+
+After final failure:
+
+Status = DeadLetter
+
+---
+
+## Why Decoupled
+
+Webhook delivery occurs asynchronously using the webhook_deliveries outbox table.
+
+The API response never waits for external webhook consumers.
+
+Benefits:
+
+- Lower latency
+- Better reliability
+- No cascading failures
+
+---
+
+# 5. API Key Model
+
+Generation:
+
+dodo*live*<prefix>.<secret>
+
+Storage:
+
+- Prefix stored plaintext
+- Full key SHA-256 hashed
+
+Transmission:
+
+Authorization: Bearer <api_key>
+
+Rotation:
+
+Create new key and revoke old key.
+
+Revocation:
+
+- is_active = false
+- revoked_at populated
+
+Blast Radius:
+
+If a database leaks, attackers obtain only hashes and prefixes, not usable API keys.
+
+---
+
+# 6. What I Cut and Why
+
+1. Kafka/RabbitMQ-based event infrastructure
+   - PostgreSQL outbox was sufficient.
+
+2. Automatic overdue invoice transitions
+   - Added complexity outside core payment flow.
+
+3. Refunds
+   - Explicitly out of scope.
+
+4. Multi-currency support
+   - Assignment specifies USD only.
+
+5. OAuth/JWT authentication
+   - API key authentication satisfies requirements.
+
+---
+
+# 7. Production Readiness Gap
+
+1. Observability
+   - OpenTelemetry tracing.
+   - Prometheus metrics.
+
+2. Rate Limiting
+   - Redis token bucket.
+
+3. Secrets Management
+   - AWS Secrets Manager / Vault.
+
+4. Data Lifecycle Management
+   - Partition payment_attempts and webhook_deliveries.
+
+5. Stronger Key Hashing
+   - Consider Argon2id for API keys.
+
+6. Dead Letter Queue Dashboard
+   - Merchant visibility into failed webhook deliveries.
+
+7. Reconciliation Jobs
+   - Periodically verify PSP state against local state.

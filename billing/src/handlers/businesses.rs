@@ -38,15 +38,19 @@ pub async fn create_business(
     let api_key = format!("{}.{}", key_prefix, key_secret);
     let key_hash = hex::encode(sha2::Sha256::digest(api_key.as_bytes()));
 
+    let mut tx = state.db.begin().await.map_err(actix_web::error::ErrorInternalServerError)?;
+
     let business: Business = business_repository
-        .create_business(&state.db, business_id, &payload.email, &payload.name)
+        .create_business(&mut tx, business_id, &payload.email, &payload.name)
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     api_key_repository
-        .create_api_key(&state.db, api_key_id, business.id, &key_prefix, &key_hash)
+        .create_api_key(&mut tx, api_key_id, business.id, &key_prefix, &key_hash)
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    tx.commit().await.map_err(actix_web::error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Created().json(CreateBusinessResponse { business, api_key }))
 }

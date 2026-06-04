@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::domains::models::Business;
@@ -8,7 +8,7 @@ pub struct BusinessRepository;
 impl BusinessRepository {
     pub async fn create_business(
         &self,
-        pool: &PgPool,
+        tx: &mut Transaction<'_, Postgres>,
         business_id: Uuid,
         email: &str,
         name: &str,
@@ -34,7 +34,7 @@ impl BusinessRepository {
             email,
             name
         )
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await?;
 
         Ok(business)

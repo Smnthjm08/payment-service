@@ -17,6 +17,15 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Error connecting to pool");
 
+    // Run any pending migrations automatically on startup.
+    // This is idempotent — already-applied migrations are skipped.
+    sqlx::migrate!("../migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to run database migrations");
+
+    log::info!("Database migrations applied successfully");
+
     let psp_url = std::env::var("PSP_URL").unwrap_or_else(|_| "http://localhost:9090".into());
     log::info!("PSP URL: {}", psp_url);
 
