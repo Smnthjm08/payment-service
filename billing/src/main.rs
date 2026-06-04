@@ -10,10 +10,12 @@ use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 pub mod domains;
 pub mod handlers;
 pub mod middlewares;
+pub mod psp_client;
 pub mod repositories;
 
 pub struct AppState {
     pub(crate) db: Pool<Postgres>,
+    pub(crate) psp_url: String,
 }
 
 async fn manual_hello() -> impl Responder {
@@ -34,13 +36,17 @@ async fn main() -> std::io::Result<()> {
         .connect(&database_url)
         .await
         .expect("Error connecting to pool");
+
+    let psp_url = std::env::var("PSP_URL").unwrap_or_else(|_| "http://localhost:9090".into());
+    log::info!("PSP URL: {}", psp_url);
+
     // bind to PORT env or default to 8080; listen on all interfaces for containers
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let bind_addr = format!("0.0.0.0:{}", port);
 
     let server = HttpServer::new(move || {
         App::new()
-            .app_data(Data::new(AppState { db: pool.clone() }))
+            .app_data(Data::new(AppState { db: pool.clone(), psp_url: psp_url.clone() }))
             .wrap(Logger::default())
             .service(
                 web::scope("/api")

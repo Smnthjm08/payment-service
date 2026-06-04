@@ -233,4 +233,183 @@ impl InvoiceRepository {
 
         Ok(results)
     }
+
+
+    pub async fn transition_to_processing(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        invoice_id: Uuid,
+        business_id: Uuid,
+    ) -> Result<Option<Invoice>, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Processing',
+                updated_at = NOW()
+            WHERE id          = $1
+              AND business_id = $2
+              AND state       = 'Open'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+            business_id,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+    }
+
+    /// Move an invoice from `Processing` → `Paid` and record `paid_at`.
+    pub async fn transition_to_paid(
+        &self,
+        pool: &PgPool,
+        invoice_id: Uuid,
+    ) -> Result<Invoice, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Paid',
+                paid_at    = NOW(),
+                updated_at = NOW()
+            WHERE id    = $1
+              AND state = 'Processing'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+        )
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Roll an invoice back from `Processing` → `Open` after a failed or timed-out PSP call.
+    pub async fn transition_to_open(
+        &self,
+        pool: &PgPool,
+        invoice_id: Uuid,
+    ) -> Result<Invoice, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Open',
+                updated_at = NOW()
+            WHERE id    = $1
+              AND state = 'Processing'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+        )
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Void an invoice (`Open` → `Void`).
+    ///
+    /// Only invoices in `Open` state can be voided. Returns `None` if the
+    /// invoice does not exist, does not belong to the business, or is not
+    /// currently `Open` — callers must convert `None` into a clear 422 error.
+    pub async fn transition_to_void(
+        &self,
+        pool: &PgPool,
+        invoice_id: Uuid,
+        business_id: Uuid,
+    ) -> Result<Option<Invoice>, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Void',
+                updated_at = NOW()
+            WHERE id          = $1
+              AND business_id = $2
+              AND state       = 'Open'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+            business_id,
+        )
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Mark an invoice as uncollectible (`Open` → `Uncollectible`).
+    ///
+    /// Only invoices in `Open` state can be marked uncollectible. Returns
+    /// `None` if the invoice does not exist, does not belong to the business,
+    /// or is not currently `Open`.
+    pub async fn transition_to_uncollectible(
+        &self,
+        pool: &PgPool,
+        invoice_id: Uuid,
+        business_id: Uuid,
+    ) -> Result<Option<Invoice>, sqlx::Error> {
+        sqlx::query_as!(
+            Invoice,
+            r#"
+            UPDATE invoices
+            SET
+                state      = 'Uncollectible',
+                updated_at = NOW()
+            WHERE id          = $1
+              AND business_id = $2
+              AND state       = 'Open'
+            RETURNING
+                id,
+                business_id,
+                customer_id,
+                state,
+                total_amount_cents,
+                due_date,
+                created_at,
+                updated_at,
+                paid_at
+            "#,
+            invoice_id,
+            business_id,
+        )
+        .fetch_optional(pool)
+        .await
+    }
 }
+

@@ -179,30 +179,57 @@ Responsibilities:
 
 ---
 
-## Invoice Lifecycle
+## Invoice State Machine
 
-- Draft
-  - Invoice has been created but not finalized.
+### State Diagram
 
-- Open
-  - Invoice has been finalized and issued to the customer.
-  - Awaiting payment.
+```mermaid
+stateDiagram-v2
+    direction LR
 
-- Processing
-  - A payment attempt is currently being processed.
-  - Prevents concurrent payment attempts for the same invoice.
+    [*] --> Open : POST /invoices (created)
 
-- Paid
-  - Full payment has been successfully received and reconciled.
-  - Terminal state.
+    Open --> Processing  : POST /invoices/{id}/pay\n(payment attempt started)
+    Open --> Void        : POST /invoices/{id}/void\n(merchant cancels)
+    Open --> Uncollectible : POST /invoices/{id}/mark_uncollectible\n(written off as bad debt)
 
-- Void
-  - Invoice has been cancelled by the merchant.
-  - Terminal state.
+    Processing --> Paid  : PSP returns succeeded
+    Processing --> Open  : PSP returns failed / timed out / error\n(retryable — rolled back)
 
-- Uncollectible
-  - Invoice has been written off as bad debt.
-  - Terminal state.
+    Paid          --> [*] : terminal
+    Void          --> [*] : terminal
+    Uncollectible --> [*] : terminal
+```
+
+### State Definitions
+
+| State | Description | Terminal? |
+|-------|-------------|----------|
+| `Open` | Invoice has been created and issued to the customer. Awaiting payment. | No |
+| `Processing` | A payment attempt is in-flight. Prevents concurrent double-charges. | No |
+| `Paid` | Full payment was successfully received. | **Yes** |
+| `Void` | Invoice was cancelled by the merchant before payment. | **Yes** |
+| `Uncollectible` | Invoice written off as bad debt by the merchant. | **Yes** |
+
+> **Note:** The `Draft` state is reserved for future use (e.g. multi-step invoice building). All invoices created via the API today start directly in `Open`.
+
+### Valid Transitions
+
+| From | To | Trigger | API endpoint |
+|------|----|---------|-------------|
+| `Open` | `Processing` | Payment attempt started | `POST /invoices/{id}/pay` |
+| `Open` | `Void` | Merchant cancels | `POST /invoices/{id}/void` |
+| `Open` | `Uncollectible` | Written off | `POST /invoices/{id}/mark_uncollectible` |
+| `Processing` | `Paid` | PSP returns `succeeded` | Internal (PSP callback) |
+| `Processing` | `Open` | PSP returns `failed`, `timed out`, or `error` | Internal (PSP callback) |
+
+### Invalid Transitions (rejected at API level)
+
+Any transition not listed above is rejected with `422 Unprocessable Entity` and an error body that names the current state and explains which transitions are valid. Examples:
+
+- Trying to `void` a `Paid` invoice → `422: Cannot void an invoice in 'Paid' state. Only invoices in 'Open' state can be voided.`
+- Trying to `pay` a `Void` invoice → `422: Invoice not found or is not in the Open state.`
+- Trying to `pay` a `Processing` invoice → `409 Conflict: A payment with this Idempotency-Key is already in progress.`
 
 ---
 
@@ -213,45 +240,39 @@ Responsibilities:
   - PSP request is in-flight.
 
 - Succeeded
-  - PSP returned a successful response.
+  - PSP returned `{ status: "succeeded" }`.
   - Terminal state.
 
 - Failed
-  - PSP returned a definitive failure.
-  - Examples:
-    - insufficient_funds
-    - card_declined
-
+  - PSP returned `{ status: "failed", code: "..." }`.
+  - Examples: `insufficient_funds`, `card_declined`
   - Terminal state.
 
 - TimedOut
-  - PSP request exceeded the configured timeout threshold.
-  - Payment outcome is unknown.
+  - PSP request exceeded the 10-second timeout threshold.
+  - Payment outcome is unknown; invoice is rolled back to `Open` for retry.
   - Terminal state.
 
 - Error
-  - Network failure or PSP internal error occurred.
+  - Network failure or PSP internal error (HTTP 500 / connection drop).
+  - Invoice is rolled back to `Open` for retry.
   - Terminal state.
 
 ## PSP Token Behaviour
 
-- tok_success
-  - Returns:
-    `{ status: "succeeded", psp_ref: <uuid> }`
+| Token | Behaviour | Response |
+|-------|-----------|----------|
+| `tok_success` | ~100 ms delay, then success | `{ "status": "succeeded", "psp_ref": "<uuid>" }` |
+| `tok_insufficient_funds` | ~100 ms delay, then decline | `{ "status": "failed", "code": "insufficient_funds" }` |
+| `tok_card_declined` | ~100 ms delay, then decline | `{ "status": "failed", "code": "card_declined" }` |
+| `tok_timeout` | Sleeps 30 s, then success | Billing service times out after 10 s → `TimedOut` |
+| `tok_network_error` | Returns HTTP 500 immediately | `{ "error": "gateway_error" }` → `GatewayError` |
 
-- tok_insufficient_funds
-  - Returns:
-    `{ status: "failed", code: "insufficient_funds" }`
-
-- tok_card_declined
-  - Returns:
-    `{ status: "failed", code: "card_declined" }`
-
-- tok_timeout
-  - Delays response for approximately 30 seconds before returning success.
-
-- tok_network_error
-  - Returns HTTP 500 or drops the connection.
+Handling `tok_timeout` and `tok_network_error` is a key evaluation point:
+- The billing service enforces a **10-second HTTP timeout** on all PSP calls.
+- On timeout: attempt is marked `TimedOut`, invoice rolls back to `Open`.
+- On network error: attempt is marked `Error`, invoice rolls back to `Open`.
+- In both cases the invoice is safe to retry with a new `Idempotency-Key`.
 
 ---
 
