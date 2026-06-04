@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::domains::enums::{InvoiceState, PaymentAttemptStatus};
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Business {
     pub id: Uuid,
     pub email: String,
@@ -14,7 +15,7 @@ pub struct Business {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ApiKey {
     pub id: Uuid,
     pub business_id: Uuid,
@@ -25,7 +26,7 @@ pub struct ApiKey {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Customer {
     pub id: Uuid,
     pub business_id: Uuid,

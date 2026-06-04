@@ -8,10 +8,12 @@ use env_logger;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 
 pub mod domains;
+pub mod handlers;
+pub mod middlewares;
 pub mod repositories;
 
 pub struct AppState {
-    db: Pool<Postgres>,
+    pub(crate) db: Pool<Postgres>,
 }
 
 async fn manual_hello() -> impl Responder {
@@ -41,7 +43,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(Data::new(AppState { db: pool.clone() }))
             .wrap(Logger::default())
             .route("/api/health", web::get().to(manual_hello))
-        // .route("/hey", web::get().to(manual_hello))
+            .service(handlers::businesses::businesses_scope())
+            .service(handlers::api_keys::api_keys_scope())
+            .service(handlers::customers::customers_scope())
     })
     .bind(&bind_addr)?
     .run();
