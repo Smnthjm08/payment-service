@@ -123,6 +123,10 @@ Responsibilities:
 
 - Receive invoice and payment lifecycle events.
 
+Security notes:
+- Signing secret storage: the platform stores the webhook signing secret as a server-generated value (stored in plaintext in the database). This is acceptable because the secret is a system-generated HMAC secret (not a user password). Treat it as write-once/display-once: the secret SHOULD be returned to the merchant immediately after creation for copy-and-store, but MUST NOT be returned in API responses afterward.
+- API behaviour: when a merchant creates a webhook endpoint, return the secret once and then redact it from subsequent reads/updates. Optionally store only a hash for verification aids, but remember HMAC verification requires access to the raw secret when sending webhooks.
+
 ---
 
 ### Webhook Delivery

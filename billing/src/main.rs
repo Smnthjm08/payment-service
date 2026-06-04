@@ -1,24 +1,18 @@
 use actix_web::{
-    post,
-    web::{self, Data},
     middleware::Logger,
+    web::{self, Data},
     App, HttpResponse, HttpServer, Responder,
 };
 use dotenv::dotenv;
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use env_logger;
-
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 
 pub struct AppState {
     db: Pool<Postgres>,
 }
 
 async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hey there!")
+    HttpResponse::Ok().body("Healthy!")
 }
 
 #[actix_web::main]
@@ -43,8 +37,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(Data::new(AppState { db: pool.clone() }))
             .wrap(Logger::default())
-            .service(echo)
-            .route("/hey", web::get().to(manual_hello))
+            .route("/api/health", web::get().to(manual_hello))
+        // .route("/hey", web::get().to(manual_hello))
     })
     .bind(&bind_addr)?
     .run();
