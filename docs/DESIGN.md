@@ -221,4 +221,4 @@ Primary Key Strategy
 - Better index locality than UUIDv4.
 - Suitable for distributed systems.
 
-![db-schema](image.png)
+![db-schema](./images/schema.png)

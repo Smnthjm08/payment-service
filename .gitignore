@@ -1,1 +1,6 @@
 /target
+# Environment configuration
+**/.env
+
+# VS Code Configuration
+**/.vscode/
