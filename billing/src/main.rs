@@ -6,12 +6,15 @@ use actix_web::{
 use dotenv::dotenv;
 use env_logger;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use std::sync::Arc;
+use std::time::Duration;
 
 pub mod domains;
 pub mod handlers;
 pub mod middlewares;
 pub mod psp_client;
 pub mod repositories;
+pub mod webhook_dispatcher;
 
 pub struct AppState {
     pub(crate) db: Pool<Postgres>,
@@ -40,6 +43,8 @@ async fn main() -> std::io::Result<()> {
     let psp_url = std::env::var("PSP_URL").unwrap_or_else(|_| "http://localhost:9090".into());
     log::info!("PSP URL: {}", psp_url);
 
+    webhook_dispatcher::spawn(Arc::new(pool.clone()), Duration::from_secs(5));
+
     // bind to PORT env or default to 8080; listen on all interfaces for containers
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let bind_addr = format!("0.0.0.0:{}", port);
@@ -53,7 +58,8 @@ async fn main() -> std::io::Result<()> {
                     .route("/health", web::get().to(manual_hello))
                     .service(handlers::businesses::businesses_scope())
                     .service(handlers::customers::customers_scope())
-                    .service(handlers::invoices::invoices_scope()),
+                    .service(handlers::invoices::invoices_scope())
+                    .service(handlers::webhooks::webhooks_scope()),
             )
     })
     .bind(&bind_addr)?

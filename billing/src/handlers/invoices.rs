@@ -105,6 +105,30 @@ pub async fn create_invoice(
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
+    // Fire-and-forget: enqueue invoice.created webhook for all active endpoints.
+    {
+        let pool = state.db.clone();
+        let business_id = auth.business_id;
+        let inv_id = invoice.id;
+        let payload_val = serde_json::json!({
+            "event": "invoice.created",
+            "invoice_id": inv_id,
+            "business_id": business_id,
+            "state": invoice.state,
+            "total_amount_cents": invoice.total_amount_cents,
+        });
+        tokio::spawn(async move {
+            crate::webhook_dispatcher::enqueue(
+                &pool,
+                business_id,
+                "invoice.created",
+                Some(inv_id),
+                payload_val,
+            )
+            .await;
+        });
+    }
+
     Ok(HttpResponse::Created().json(InvoiceResponse { invoice, line_items: items }))
 }
 
@@ -347,6 +371,30 @@ pub async fn pay_invoice(
                 .await
                 .map_err(actix_web::error::ErrorInternalServerError)?;
 
+            // Fire-and-forget: invoice.paid
+            {
+                let pool = state.db.clone();
+                let business_id = auth.business_id;
+                let inv_id = paid_invoice.id;
+                let payload_val = serde_json::json!({
+                    "event": "invoice.paid",
+                    "invoice_id": inv_id,
+                    "business_id": business_id,
+                    "psp_ref": psp_ref,
+                    "amount_cents": paid_invoice.total_amount_cents,
+                });
+                tokio::spawn(async move {
+                    crate::webhook_dispatcher::enqueue(
+                        &pool,
+                        business_id,
+                        "invoice.paid",
+                        Some(inv_id),
+                        payload_val,
+                    )
+                    .await;
+                });
+            }
+
             (updated_attempt, paid_invoice)
         }
 
@@ -373,6 +421,31 @@ pub async fn pay_invoice(
                 .await
                 .map_err(actix_web::error::ErrorInternalServerError)?;
 
+            // Fire-and-forget: invoice.payment_failed (declined)
+            {
+                let pool = state.db.clone();
+                let business_id = auth.business_id;
+                let inv_id = open_invoice.id;
+                let fc = failure_code.clone();
+                let payload_val = serde_json::json!({
+                    "event": "invoice.payment_failed",
+                    "invoice_id": inv_id,
+                    "business_id": business_id,
+                    "failure_code": fc,
+                    "reason": "card_declined",
+                });
+                tokio::spawn(async move {
+                    crate::webhook_dispatcher::enqueue(
+                        &pool,
+                        business_id,
+                        "invoice.payment_failed",
+                        Some(inv_id),
+                        payload_val,
+                    )
+                    .await;
+                });
+            }
+
             (updated_attempt, open_invoice)
         }
 
@@ -395,6 +468,30 @@ pub async fn pay_invoice(
                 .await
                 .map_err(actix_web::error::ErrorInternalServerError)?;
 
+            // Fire-and-forget: invoice.payment_failed (timeout)
+            {
+                let pool = state.db.clone();
+                let business_id = auth.business_id;
+                let inv_id = open_invoice.id;
+                let payload_val = serde_json::json!({
+                    "event": "invoice.payment_failed",
+                    "invoice_id": inv_id,
+                    "business_id": business_id,
+                    "failure_code": "psp_timeout",
+                    "reason": "psp_timeout",
+                });
+                tokio::spawn(async move {
+                    crate::webhook_dispatcher::enqueue(
+                        &pool,
+                        business_id,
+                        "invoice.payment_failed",
+                        Some(inv_id),
+                        payload_val,
+                    )
+                    .await;
+                });
+            }
+
             (updated_attempt, open_invoice)
         }
 
@@ -416,6 +513,30 @@ pub async fn pay_invoice(
                 .transition_to_open(&state.db, invoice_id)
                 .await
                 .map_err(actix_web::error::ErrorInternalServerError)?;
+
+            // Fire-and-forget: invoice.payment_failed (gateway error)
+            {
+                let pool = state.db.clone();
+                let business_id = auth.business_id;
+                let inv_id = open_invoice.id;
+                let payload_val = serde_json::json!({
+                    "event": "invoice.payment_failed",
+                    "invoice_id": inv_id,
+                    "business_id": business_id,
+                    "failure_code": "gateway_error",
+                    "reason": "psp_gateway_error",
+                });
+                tokio::spawn(async move {
+                    crate::webhook_dispatcher::enqueue(
+                        &pool,
+                        business_id,
+                        "invoice.payment_failed",
+                        Some(inv_id),
+                        payload_val,
+                    )
+                    .await;
+                });
+            }
 
             (updated_attempt, open_invoice)
         }
