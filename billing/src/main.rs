@@ -1,11 +1,14 @@
 use actix_web::{
+    App, HttpResponse, HttpServer, Responder,
     middleware::Logger,
     web::{self, Data},
-    App, HttpResponse, HttpServer, Responder,
 };
 use dotenv::dotenv;
 use env_logger;
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+
+pub mod domains;
+pub mod repositories;
 
 pub struct AppState {
     db: Pool<Postgres>,
