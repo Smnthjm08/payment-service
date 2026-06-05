@@ -2,6 +2,8 @@
 
 This document details how AI was leveraged during the development of this Payment Service, and more importantly, where human architectural decisions overrode AI suggestions to satisfy the correctness, reliability, and multi-tenancy requirements of the assignment.
 
+---
+
 ## 1. AI Tools Used and Their Purpose
 
 ### Cursor / Autocomplete
@@ -178,9 +180,34 @@ This guarantees only one payment flow can proceed for a given invoice.
 
 ---
 
+### 6. API Key Storage Strategy
+
+**What the AI proposed:**
+
+Storing raw API keys directly in the database.
+
+**What I chose:**
+
+Storing:
+
+- key_prefix (plaintext)
+- key_hash (SHA-256)
+
+while never persisting the plaintext API key.
+
+**Why:**
+
+API keys are shown only once during creation.
+
+If the database is compromised, attackers cannot directly use stored credentials.
+
+The prefix enables efficient lookup while the hash enables verification without storing secrets.
+
+---
+
 ## 3. What the AI Got Wrong and Required Manual Correction
 
-### Missing Database Transactions
+### 1. Missing Database Transactions
 
 During early iterations, AI-generated invoice creation logic inserted:
 
@@ -203,13 +230,11 @@ I wrapped the operation inside a PostgreSQL transaction:
 let mut tx = pool.begin().await?;
 ```
 
-and executed all queries through the transaction before committing.
-
-The same correction was applied to the Business + API Key creation flow.
+and executed all queries through the transaction before committing. The same correction was applied to the Business + API Key creation flow.
 
 ---
 
-### Missing Multi-Tenant Authorization Checks
+### 2. Missing Multi-Tenant Authorization Checks
 
 Early repository implementations performed lookups using only primary keys.
 
@@ -226,7 +251,7 @@ A business could potentially access another business's records if a UUID became 
 
 **Correction:**
 
-I added tenant scoping:
+I added tenant scoping to every query:
 
 ```sql
 SELECT * FROM customers
@@ -234,23 +259,25 @@ WHERE id = $1
 AND business_id = $2
 ```
 
-The same pattern is applied to invoices and other tenant-owned resources.
+The same pattern is applied to invoices, webhooks, and all other tenant-owned resources.
 
 ---
 
-### Missing State Validation
+### 3. Missing State Validation
 
-Early AI-generated payment logic focused on calling the PSP directly.
+Early AI-generated payment logic focused on calling the PSP directly without validating the current invoice state.
 
 **Problem:**
 
-Invoices in terminal states could potentially be paid again.
+Invoices in terminal states (`Paid`, `Void`, `Uncollectible`) could potentially be charged again. Invoices in `Draft` state could also be paid without being finalized.
 
 **Correction:**
 
-I introduced an explicit invoice state machine with valid and invalid transitions.
+I introduced an explicit invoice state machine with enforced valid and invalid transitions. The atomic `UPDATE ... WHERE state = 'Open'` ensures:
 
-Terminal states reject further payment attempts.
+- Only `Open` invoices can be charged.
+- `Draft` invoices must be finalized first.
+- Terminal states reject all further payment attempts with `422 Unprocessable Entity`.
 
 This prevents invalid business operations and duplicate charging scenarios.
 

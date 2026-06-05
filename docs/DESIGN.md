@@ -8,21 +8,117 @@ The design prioritizes correctness over feature breadth. Particular attention is
 
 ---
 
+## Request Flow
+
+The following diagram shows how a request moves through the system from authentication to persistence and webhook delivery.
+
+```mermaid
+flowchart LR
+
+    Client --> ApiKeyMiddleware
+    ApiKeyMiddleware --> Handler
+    Handler --> Repository
+    Repository --> PostgreSQL
+
+    Handler --> WebhookEvent
+    WebhookEvent --> WebhookDeliveries
+    WebhookDeliveries --> MerchantEndpoint
+
+    Handler --> MockPSP
+```
+
 # 1. Data Model
 
 ## Entity Relationship Overview
 
-Business
-├── ApiKeys
-├── Customers
-├── Invoices
-│ ├── InvoiceLineItems
-│ └── PaymentAttempts
-├── WebhookEndpoints
-│ └── WebhookDeliveries
-└── IdempotencyKeys
+```mermaid
+erDiagram
 
----
+    BUSINESSES {
+        UUID id PK
+        TEXT email
+        TEXT name
+        BOOLEAN is_active
+    }
+
+    API_KEYS {
+        UUID id PK
+        UUID business_id FK
+        TEXT key_prefix
+        TEXT key_hash
+        BOOLEAN is_active
+    }
+
+    CUSTOMERS {
+        UUID id PK
+        UUID business_id FK
+        TEXT email
+        TEXT name
+    }
+
+    INVOICES {
+        UUID id PK
+        UUID business_id FK
+        UUID customer_id FK
+        TEXT state
+        BIGINT total_amount_cents
+        TIMESTAMPTZ due_date
+    }
+
+    INVOICE_LINE_ITEMS {
+        UUID id PK
+        UUID invoice_id FK
+        TEXT description
+        INTEGER quantity
+        BIGINT unit_amount_cents
+    }
+
+    PAYMENT_ATTEMPTS {
+        UUID id PK
+        UUID invoice_id FK
+        TEXT status
+        BIGINT amount_cents
+        TEXT card_token
+        TEXT psp_ref
+    }
+
+    WEBHOOK_ENDPOINTS {
+        UUID id PK
+        UUID business_id FK
+        TEXT url
+        BOOLEAN is_active
+    }
+
+    WEBHOOK_DELIVERIES {
+        UUID id PK
+        UUID endpoint_id FK
+        UUID invoice_id FK
+        TEXT event_type
+        TEXT status
+    }
+
+    IDEMPOTENCY_KEYS {
+        UUID id PK
+        UUID business_id FK
+        TEXT key
+        TEXT request_hash
+        TIMESTAMPTZ expires_at
+    }
+
+    BUSINESSES ||--o{ API_KEYS : owns
+    BUSINESSES ||--o{ CUSTOMERS : owns
+    BUSINESSES ||--o{ INVOICES : owns
+    BUSINESSES ||--o{ WEBHOOK_ENDPOINTS : owns
+    BUSINESSES ||--o{ IDEMPOTENCY_KEYS : owns
+
+    CUSTOMERS ||--o{ INVOICES : receives
+
+    INVOICES ||--o{ INVOICE_LINE_ITEMS : contains
+    INVOICES ||--o{ PAYMENT_ATTEMPTS : has
+
+    WEBHOOK_ENDPOINTS ||--o{ WEBHOOK_DELIVERIES : sends
+    INVOICES ||--o{ WEBHOOK_DELIVERIES : generates
+```
 
 ## businesses
 
@@ -311,7 +407,9 @@ The winner proceeds to the PSP.
 
 All others receive:
 
-409 Conflict
+422 Unprocessable Entity
+
+(The invoice is no longer in `Open` state from their perspective — the state-conditional update returns 0 rows.)
 
 No duplicate PSP calls occur.
 
@@ -393,18 +491,17 @@ Algorithm:
 
 HMAC-SHA256
 
-Headers:
+Headers sent on every delivery:
 
-X-Dodo-Signature
-X-Dodo-Timestamp
+```
+X-Webhook-Signature: sha256=<hex>
+X-Webhook-Event: invoice.paid
+X-Webhook-Delivery-Id: <uuid>
+```
 
 Signed payload:
 
-timestamp + request body
-
-Replay protection:
-
-Receivers reject timestamps older than 5 minutes.
+HMAC-SHA256 of the raw JSON body using the endpoint's per-secret key.
 
 ---
 
@@ -412,19 +509,19 @@ Receivers reject timestamps older than 5 minutes.
 
 Attempt 1: Immediate
 
-Attempt 2: 1 minute
+Attempt 2: +1 minute
 
-Attempt 3: 5 minutes
+Attempt 3: +5 minutes
 
-Attempt 4: 15 minutes
+Attempt 4: +30 minutes
 
-Attempt 5: 1 hour
+Attempt 5: +2 hours
 
-Attempt 6: 6 hours
+Attempt 6: +8 hours
 
-After final failure:
+After attempt 6 fails:
 
-Status = DeadLetter
+Status = `failed` (terminal — requires manual investigation)
 
 ---
 
