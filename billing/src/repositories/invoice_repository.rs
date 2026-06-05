@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 use crate::domains::models::{Invoice, InvoiceLineItem};
 
@@ -21,7 +21,7 @@ impl InvoiceRepository {
             .map(|(_, _, qty, unit)| (*qty as i64) * (*unit))
             .sum();
 
-            let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+        let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
 
         let invoice = sqlx::query_as!(
             Invoice,
@@ -234,7 +234,6 @@ impl InvoiceRepository {
         Ok(results)
     }
 
-
     pub async fn transition_to_open_from_draft(
         &self,
         pool: &PgPool,
@@ -446,4 +445,3 @@ impl InvoiceRepository {
         .await
     }
 }
-

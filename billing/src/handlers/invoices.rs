@@ -44,7 +44,10 @@ pub fn invoices_scope() -> impl actix_web::dev::HttpServiceFactory {
         .route("/{id}/pay", web::post().to(pay_invoice))
         .route("/{id}/finalize", web::post().to(finalize_invoice))
         .route("/{id}/void", web::post().to(void_invoice))
-        .route("/{id}/mark_uncollectible", web::post().to(mark_uncollectible))
+        .route(
+            "/{id}/mark_uncollectible",
+            web::post().to(mark_uncollectible),
+        )
 }
 
 pub async fn create_invoice(
@@ -65,23 +68,33 @@ pub async fn create_invoice(
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     if customer.is_none() {
-        return Err(actix_web::error::ErrorBadRequest("Invalid customer_id for this business"));
+        return Err(actix_web::error::ErrorBadRequest(
+            "Invalid customer_id for this business",
+        ));
     }
 
     // validate line items
     if payload.line_items.is_empty() {
-        return Err(actix_web::error::ErrorBadRequest("line_items cannot be empty"));
+        return Err(actix_web::error::ErrorBadRequest(
+            "line_items cannot be empty",
+        ));
     }
 
     for li in &payload.line_items {
         if li.description.trim().is_empty() {
-            return Err(actix_web::error::ErrorBadRequest("line item description cannot be empty"));
+            return Err(actix_web::error::ErrorBadRequest(
+                "line item description cannot be empty",
+            ));
         }
         if li.quantity <= 0 {
-            return Err(actix_web::error::ErrorBadRequest("line item quantity must be > 0"));
+            return Err(actix_web::error::ErrorBadRequest(
+                "line item quantity must be > 0",
+            ));
         }
         if li.unit_amount_cents < 0 {
-            return Err(actix_web::error::ErrorBadRequest("unit_amount_cents must be >= 0"));
+            return Err(actix_web::error::ErrorBadRequest(
+                "unit_amount_cents must be >= 0",
+            ));
         }
     }
 
@@ -91,7 +104,14 @@ pub async fn create_invoice(
     let items_input: Vec<(Uuid, String, i32, i64)> = payload
         .line_items
         .iter()
-        .map(|li| (Uuid::new_v4(), li.description.clone(), li.quantity, li.unit_amount_cents))
+        .map(|li| {
+            (
+                Uuid::new_v4(),
+                li.description.clone(),
+                li.quantity,
+                li.unit_amount_cents,
+            )
+        })
         .collect();
 
     let (invoice, items) = repo
@@ -130,7 +150,10 @@ pub async fn create_invoice(
         });
     }
 
-    Ok(HttpResponse::Created().json(InvoiceResponse { invoice, line_items: items }))
+    Ok(HttpResponse::Created().json(InvoiceResponse {
+        invoice,
+        line_items: items,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +183,10 @@ pub async fn list_invoices(
 
     let resp: Vec<InvoiceResponse> = rows
         .into_iter()
-        .map(|(invoice, line_items)| InvoiceResponse { invoice, line_items })
+        .map(|(invoice, line_items)| InvoiceResponse {
+            invoice,
+            line_items,
+        })
         .collect();
 
     Ok(HttpResponse::Ok().json(resp))
@@ -185,7 +211,10 @@ pub async fn get_invoice(
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     match maybe {
-        Some((invoice, line_items)) => Ok(HttpResponse::Ok().json(InvoiceResponse { invoice, line_items })),
+        Some((invoice, line_items)) => Ok(HttpResponse::Ok().json(InvoiceResponse {
+            invoice,
+            line_items,
+        })),
         None => Ok(HttpResponse::NotFound().finish()),
     }
 }
@@ -200,7 +229,6 @@ pub struct PayInvoiceResponse {
     pub invoice: Invoice,
     pub payment_attempt: PaymentAttemptView,
 }
-
 
 #[derive(Debug, Serialize)]
 pub struct PaymentAttemptView {
@@ -219,11 +247,11 @@ impl From<PaymentAttempt> for PaymentAttemptView {
     fn from(a: PaymentAttempt) -> Self {
         use crate::domains::enums::PaymentAttemptStatus;
         let status = match a.status {
-            PaymentAttemptStatus::Pending    => "Pending",
-            PaymentAttemptStatus::Succeeded  => "Succeeded",
-            PaymentAttemptStatus::Failed     => "Failed",
-            PaymentAttemptStatus::TimedOut   => "TimedOut",
-            PaymentAttemptStatus::Error      => "Error",
+            PaymentAttemptStatus::Pending => "Pending",
+            PaymentAttemptStatus::Succeeded => "Succeeded",
+            PaymentAttemptStatus::Failed => "Failed",
+            PaymentAttemptStatus::TimedOut => "TimedOut",
+            PaymentAttemptStatus::Error => "Error",
         };
         Self {
             id: a.id,
@@ -298,7 +326,12 @@ pub async fn pay_invoice(
     };
 
     let idem_record = idem_repo
-        .create_key(&state.db, auth.business_id, &idempotency_key_str, &request_hash)
+        .create_key(
+            &state.db,
+            auth.business_id,
+            &idempotency_key_str,
+            &request_hash,
+        )
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
@@ -354,7 +387,11 @@ pub async fn pay_invoice(
     // ── 10–13. Record outcome and update invoice state ────────────────────────
     let (final_attempt, final_invoice) = match psp_result {
         PspResult::Success { psp_ref, raw } => {
-            log::info!("PSP success for attempt {}; psp_ref={}", attempt_id, psp_ref);
+            log::info!(
+                "PSP success for attempt {}; psp_ref={}",
+                attempt_id,
+                psp_ref
+            );
             let updated_attempt = attempt_repo
                 .update_attempt(
                     &state.db,
@@ -553,11 +590,16 @@ pub async fn pay_invoice(
         payment_attempt: final_attempt.into(),
     };
 
-    let json_value = serde_json::to_value(&response_body)
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+    let json_value =
+        serde_json::to_value(&response_body).map_err(actix_web::error::ErrorInternalServerError)?;
 
     if let Err(e) = idem_repo
-        .complete_key(&state.db, idem_record.id, json_value.clone(), status_code as i32)
+        .complete_key(
+            &state.db,
+            idem_record.id,
+            json_value.clone(),
+            status_code as i32,
+        )
         .await
     {
         log::error!("Failed to complete idempotency key record: {e}");

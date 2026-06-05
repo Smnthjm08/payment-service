@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AppState,
-    middlewares::api_key_middleware::AuthenticatedBusiness,
+    AppState, middlewares::api_key_middleware::AuthenticatedBusiness,
     repositories::webhook_repository::WebhookRepository,
 };
 
@@ -13,7 +12,6 @@ fn gen_secret() -> String {
     let bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
     hex::encode(bytes)
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWebhookRequest {
@@ -39,7 +37,6 @@ pub struct WebhookEndpointView {
     pub is_active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-
 
 pub fn webhooks_scope() -> impl actix_web::dev::HttpServiceFactory {
     web::scope("/webhooks")
@@ -132,7 +129,9 @@ pub async fn delete_webhook(
             is_active: e.is_active,
             created_at: e.created_at,
         })),
-        None => Err(actix_web::error::ErrorNotFound("Webhook endpoint not found")),
+        None => Err(actix_web::error::ErrorNotFound(
+            "Webhook endpoint not found",
+        )),
     }
 }
 

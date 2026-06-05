@@ -29,11 +29,11 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for PaymentAttemptStatus {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let text = <&str as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
         match text {
-            "Pending"   => Ok(Self::Pending),
+            "Pending" => Ok(Self::Pending),
             "Succeeded" => Ok(Self::Succeeded),
-            "Failed"    => Ok(Self::Failed),
-            "TimedOut"  => Ok(Self::TimedOut),
-            "Error"     => Ok(Self::Error),
+            "Failed" => Ok(Self::Failed),
+            "TimedOut" => Ok(Self::TimedOut),
+            "Error" => Ok(Self::Error),
             other => Err(format!("Unknown PaymentAttemptStatus: {other}").into()),
         }
     }
@@ -45,11 +45,11 @@ impl sqlx::Encode<'_, sqlx::Postgres> for PaymentAttemptStatus {
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         let s: &str = match self {
-            Self::Pending   => "Pending",
+            Self::Pending => "Pending",
             Self::Succeeded => "Succeeded",
-            Self::Failed    => "Failed",
-            Self::TimedOut  => "TimedOut",
-            Self::Error     => "Error",
+            Self::Failed => "Failed",
+            Self::TimedOut => "TimedOut",
+            Self::Error => "Error",
         };
         <&str as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(&s, buf)
     }

@@ -8,7 +8,6 @@ use crate::domains::models::{WebhookDelivery, WebhookEndpoint};
 pub struct WebhookRepository;
 
 impl WebhookRepository {
-
     pub async fn create_endpoint(
         &self,
         pool: &PgPool,
@@ -197,9 +196,9 @@ impl WebhookRepository {
             1 => Some(1),
             2 => Some(5),
             3 => Some(30),
-            4 => Some(120),  
-            5 => Some(480), 
-            _ => None,       
+            4 => Some(120),
+            5 => Some(480),
+            _ => None,
         };
 
         if let Some(delay_min) = backoff_minutes {

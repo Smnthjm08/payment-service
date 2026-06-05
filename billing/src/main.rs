@@ -38,7 +38,10 @@ async fn main() -> std::io::Result<()> {
 
     let server = HttpServer::new(move || {
         App::new()
-            .app_data(Data::new(AppState { db: pool.clone(), psp_url: psp_url.clone() }))
+            .app_data(Data::new(AppState {
+                db: pool.clone(),
+                psp_url: psp_url.clone(),
+            }))
             .wrap(Logger::default())
             .configure(configure_routes)
     })

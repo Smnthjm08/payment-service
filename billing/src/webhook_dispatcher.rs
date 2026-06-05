@@ -9,7 +9,6 @@ use crate::repositories::webhook_repository::WebhookRepository;
 
 type HmacSha256 = Hmac<Sha256>;
 
-
 fn sign_payload(secret: &str, body: &[u8]) -> String {
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
@@ -63,12 +62,9 @@ async fn run(pool: Arc<PgPool>, poll_interval: Duration) {
                                 delivery.endpoint_id,
                                 delivery.id
                             );
-                            let _ = repo.mark_failed_or_retry(
-                                &pool,
-                                delivery.id,
-                                6,
-                                "endpoint deactivated",
-                            ).await;
+                            let _ = repo
+                                .mark_failed_or_retry(&pool, delivery.id, 6, "endpoint deactivated")
+                                .await;
                             continue;
                         }
                         Err(e) => {
@@ -126,11 +122,7 @@ async fn run(pool: Arc<PgPool>, poll_interval: Duration) {
                         }
                         Ok(resp) => {
                             let err = format!("HTTP {}", resp.status());
-                            log::warn!(
-                                "Webhook delivery {} failed: {}",
-                                delivery.id,
-                                err
-                            );
+                            log::warn!("Webhook delivery {} failed: {}", delivery.id, err);
                             let _ = repo
                                 .mark_failed_or_retry(
                                     &pool,
@@ -142,11 +134,7 @@ async fn run(pool: Arc<PgPool>, poll_interval: Duration) {
                         }
                         Err(e) => {
                             let err = e.to_string();
-                            log::warn!(
-                                "Webhook delivery {} network error: {}",
-                                delivery.id,
-                                err
-                            );
+                            log::warn!("Webhook delivery {} network error: {}", delivery.id, err);
                             let _ = repo
                                 .mark_failed_or_retry(
                                     &pool,
@@ -188,7 +176,14 @@ pub async fn enqueue(
     for endpoint in endpoints {
         let delivery_id = uuid::Uuid::new_v4();
         if let Err(e) = repo
-            .create_delivery(pool, delivery_id, endpoint.id, invoice_id, event_type, &payload)
+            .create_delivery(
+                pool,
+                delivery_id,
+                endpoint.id,
+                invoice_id,
+                event_type,
+                &payload,
+            )
             .await
         {
             log::error!(

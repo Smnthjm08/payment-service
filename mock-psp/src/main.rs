@@ -13,7 +13,6 @@ struct ChargeRequest {
     idempotency_key: Option<String>,
 }
 
-
 /// Success:  { "status": "succeeded", "psp_ref": "<uuid>" }
 /// Failure:  { "status": "failed",    "code": "<reason>"  }
 #[derive(Debug, Serialize)]
@@ -72,12 +71,10 @@ async fn charge(payload: web::Json<ChargeRequest>) -> impl Responder {
         }
 
         // Returns HTTP 500 — billing service must recover gracefully.
-        "tok_network_error" => {
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "gateway_error",
-                "message": "An internal error occurred in the payment gateway"
-            }))
-        }
+        "tok_network_error" => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "gateway_error",
+            "message": "An internal error occurred in the payment gateway"
+        })),
 
         _ => {
             sleep(Duration::from_millis(100)).await;

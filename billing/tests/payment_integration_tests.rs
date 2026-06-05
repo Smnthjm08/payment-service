@@ -74,7 +74,10 @@ fn log_json(label: &str, value: &serde_json::Value) {
 
 fn textwrap(s: String, indent: usize) -> String {
     let pad = " ".repeat(indent);
-    s.lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(|l| format!("{pad}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── Seed helpers ─────────────────────────────────────────────────────────────
@@ -197,19 +200,17 @@ async fn start_psp_counting() -> (String, Arc<AtomicUsize>) {
         tokio::spawn(
             HttpServer::new(move || {
                 let c2 = c.clone();
-                App::new()
-                    .app_data(Data::new(c2))
-                    .route(
-                        "/charge",
-                        web::post().to(|cnt: Data<Arc<AtomicUsize>>| async move {
-                            cnt.fetch_add(1, Ordering::SeqCst);
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                            actix_web::HttpResponse::Ok().json(serde_json::json!({
-                                "status": "succeeded",
-                                "psp_ref": Uuid::new_v4().to_string()
-                            }))
-                        }),
-                    )
+                App::new().app_data(Data::new(c2)).route(
+                    "/charge",
+                    web::post().to(|cnt: Data<Arc<AtomicUsize>>| async move {
+                        cnt.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        actix_web::HttpResponse::Ok().json(serde_json::json!({
+                            "status": "succeeded",
+                            "psp_ref": Uuid::new_v4().to_string()
+                        }))
+                    }),
+                )
             })
             .listen(listener)
             .unwrap()
@@ -363,7 +364,9 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
             }
             422 => {
                 unprocessable += 1;
-                eprintln!("  request #{i:>2}  →  \x1b[1;33m422 Unprocessable\x1b[0m  (lost the race — correct)");
+                eprintln!(
+                    "  request #{i:>2}  →  \x1b[1;33m422 Unprocessable\x1b[0m  (lost the race — correct)"
+                );
             }
             other => {
                 eprintln!("  request #{i:>2}  →  \x1b[1;31m{other} UNEXPECTED\x1b[0m");
@@ -388,7 +391,9 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
         N,
         "all {N} requests must be 200 or 422 — none may 5xx or be silently lost"
     );
-    log_pass!(format!("All {N} responses accounted for (no 5xx, no silent loss)"));
+    log_pass!(format!(
+        "All {N} responses accounted for (no 5xx, no silent loss)"
+    ));
 
     // DB: invoice must be Paid
     let inv = sqlx::query!("SELECT state FROM invoices WHERE id = $1", invoice_id)
@@ -411,7 +416,10 @@ async fn test_concurrent_pay_only_one_succeeds(pool: PgPool) {
     .unwrap_or(0);
 
     log_kv!("DB Succeeded attempts", succeeded);
-    assert_eq!(succeeded, 1, "exactly one Succeeded attempt must exist, got {succeeded}");
+    assert_eq!(
+        succeeded, 1,
+        "exactly one Succeeded attempt must exist, got {succeeded}"
+    );
     log_pass!("Exactly 1 Succeeded payment_attempt (no double-charge)");
 
     eprintln!("\n\x1b[1;32m✔✔  TEST 1 PASSED\x1b[0m\n");
@@ -472,7 +480,10 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
 
     let psp_calls_after_first = call_count.load(Ordering::SeqCst);
     log_kv!("PSP /charge calls", psp_calls_after_first);
-    assert_eq!(psp_calls_after_first, 1, "first request must trigger exactly one PSP call");
+    assert_eq!(
+        psp_calls_after_first, 1,
+        "first request must trigger exactly one PSP call"
+    );
     log_pass!("PSP called once after first request");
 
     // ── Second request (replay) ───────────────────────────────────────────────
@@ -492,15 +503,17 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
     // Bodies must be byte-for-byte identical
     let bodies_match = body1 == body2;
     log_kv!("Bodies identical", bodies_match);
-    assert_eq!(body1, body2, "idempotent replay must return an identical response body");
+    assert_eq!(
+        body1, body2,
+        "idempotent replay must return an identical response body"
+    );
     log_pass!("Response bodies are identical (byte-for-byte JSON match)");
 
     // PSP must have been called exactly once total
     let total_psp_calls = call_count.load(Ordering::SeqCst);
     log_kv!("Total PSP /charge calls", total_psp_calls);
     assert_eq!(
-        total_psp_calls,
-        1,
+        total_psp_calls, 1,
         "PSP must be called exactly once; idempotency replay must not reach PSP"
     );
     log_pass!("PSP called exactly once (replay served from cache)");
@@ -516,7 +529,10 @@ async fn test_idempotent_pay_replays_without_second_psp_call(pool: PgPool) {
     .unwrap_or(0);
 
     log_kv!("DB payment_attempts count", attempts);
-    assert_eq!(attempts, 1, "exactly one payment_attempt must exist after replay");
+    assert_eq!(
+        attempts, 1,
+        "exactly one payment_attempt must exist after replay"
+    );
     log_pass!("Exactly 1 payment_attempt row (no duplicate created)");
 
     eprintln!("\n\x1b[1;32m✔✔  TEST 2 PASSED\x1b[0m\n");
@@ -614,8 +630,14 @@ async fn test_psp_timeout_invoice_not_stuck_in_processing(pool: PgPool) {
     .await
     .unwrap();
     log_kv!("DB attempt.status", &attempt.status);
-    log_kv!("DB attempt.failure_code", attempt.failure_code.as_deref().unwrap_or("null"));
-    assert_eq!(attempt.status, "TimedOut", "attempt must be marked TimedOut");
+    log_kv!(
+        "DB attempt.failure_code",
+        attempt.failure_code.as_deref().unwrap_or("null")
+    );
+    assert_eq!(
+        attempt.status, "TimedOut",
+        "attempt must be marked TimedOut"
+    );
     log_pass!("payment_attempt.status = TimedOut");
 
     eprintln!("\n\x1b[1;32m✔✔  TEST 3a PASSED\x1b[0m\n");
@@ -699,7 +721,10 @@ async fn test_psp_network_error_invoice_returns_to_open(pool: PgPool) {
     .await
     .unwrap();
     log_kv!("DB attempt.status", &attempt.status);
-    log_kv!("DB attempt.failure_code", attempt.failure_code.as_deref().unwrap_or("null"));
+    log_kv!(
+        "DB attempt.failure_code",
+        attempt.failure_code.as_deref().unwrap_or("null")
+    );
     assert_eq!(attempt.status, "Error", "attempt must be marked Error");
     log_pass!("payment_attempt.status = Error");
 

@@ -5,11 +5,19 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub enum PspResult {
     // The PSP accepted and authorised.
-    Success { psp_ref: String, raw: serde_json::Value },
+    Success {
+        psp_ref: String,
+        raw: serde_json::Value,
+    },
     // insufficient_funds, card_declined.
-    Declined { failure_code: String, raw: serde_json::Value },
+    Declined {
+        failure_code: String,
+        raw: serde_json::Value,
+    },
     /// The PSP returned a non-2xx status code.
-    GatewayError { raw: serde_json::Value },
+    GatewayError {
+        raw: serde_json::Value,
+    },
     // PSP exceeded the configured timeout.
     TimedOut,
 }
@@ -21,7 +29,6 @@ struct ChargeRequest {
     idempotency_key: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct ChargeResponseBody {
     status: String,
@@ -30,7 +37,6 @@ struct ChargeResponseBody {
     // failure code
     code: Option<String>,
 }
-
 
 pub async fn charge(
     psp_base_url: &str,
@@ -86,7 +92,9 @@ pub async fn charge(
 
     match serde_json::from_value::<ChargeResponseBody>(raw.clone()) {
         Ok(body) if body.status == "succeeded" => PspResult::Success {
-            psp_ref: body.psp_ref.unwrap_or_else(|| format!("psp_{}", Uuid::new_v4())),
+            psp_ref: body
+                .psp_ref
+                .unwrap_or_else(|| format!("psp_{}", Uuid::new_v4())),
             raw,
         },
         Ok(body) if body.status == "failed" => PspResult::Declined {

@@ -380,7 +380,7 @@ Registers a new webhook endpoint for the authenticated business. The signing sec
 }
 ```
 
-> Store `secret` securely. It is used to verify the `X-Dodo-Signature` HMAC on incoming webhook deliveries. It will not be returned again.
+> Store `secret` securely. It is used to verify the `X-Webhook-Signature` HMAC on incoming webhook deliveries. It will not be returned again.
 
 **Events delivered**
 

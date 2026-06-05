@@ -1,136 +1,244 @@
 # Payment Service
 
-A mock billing API implementing API-key auth, customer/invoice management, an invoice state
-machine, idempotent PSP-backed payments, signed async webhook delivery, and the integration
-tests described below.
+A multi-tenant billing API built with Rust (Actix Web), PostgreSQL, and SQLx. Supports API-key authentication, customer and invoice management, an enforced invoice state machine, idempotent PSP-backed payments, and signed async webhook delivery.
 
 ---
 
-## Quick start (Docker — recommended)
+## Running the Service
+
+### Docker (recommended — one command)
 
 ```bash
 docker compose up --build
 ```
 
-That single command:
-1. Starts **Postgres** and waits until it is healthy.
-2. Runs all **sqlx migrations** via the `migrate` container.
-3. Starts the **mock-psp** on port `9090` and waits until it is healthy.
-4. Starts the **billing** API on port `8080`, pre-wired to Postgres and the mock-psp.
+This starts:
 
-Services are available at:
-- Billing API: `http://localhost:8080`
-- Mock PSP: `http://localhost:9090`
-- Postgres: `localhost:5432`
+1. **PostgreSQL** on port `5432`
+2. **Mock PSP** on port `9090`
+3. **Billing API** on port `8080` (migrations run automatically on startup)
 
-To stop everything:
+To stop:
 
 ```bash
-docker compose down          # keep the DB volume
-docker compose down -v       # wipe the DB too
+docker compose down       # keep DB volume
+docker compose down -v    # wipe DB too
 ```
 
----
-
-## Quick start (local / native)
+### Local / Native
 
 ```bash
-# copy and fill in secrets
+# Copy environment config
 cp .env.example .env
 
-# apply migrations
-sqlx migrate run
-
-# start the mock PSP (separate terminal)
+# Start mock PSP (separate terminal)
 cargo run --bin mock-psp
 
-# start the billing API
+# Start billing API
 cargo run --bin billing
 ```
 
-The billing API binds to `0.0.0.0:8080` by default (override with `PORT=`).  
-The mock PSP binds to `0.0.0.0:9090` by default (override with `MOCK_PSP_PORT=`).
+---
+
+## Environment Variables
+
+| Variable        | Default                 | Purpose                                 |
+| --------------- | ----------------------- | --------------------------------------- |
+| `DATABASE_URL`  | —                       | PostgreSQL connection string (required) |
+| `PSP_URL`       | `http://localhost:9090` | Base URL of the mock PSP                |
+| `PORT`          | `8080`                  | Billing API listen port                 |
+| `MOCK_PSP_PORT` | `9090`                  | Mock PSP listen port                    |
+| `RUST_LOG`      | —                       | Log level e.g. `billing=debug,info`     |
 
 ---
 
-## Environment variables
+## Example Usage (curl)
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | — | PostgreSQL connection string (required) |
-| `PSP_URL` | `http://localhost:9090` | Base URL of the mock PSP |
-| `PORT` | `8080` | Billing API listen port |
-| `MOCK_PSP_PORT` | `9090` | Mock PSP listen port |
-| `RUST_LOG` | — | Log level e.g. `billing=debug,info` |
+The examples below walk through the full payment lifecycle. Replace `$API_KEY` with the key returned when you create a business.
 
----
+### 1. Create a Business
 
-## Migrations
+No authentication required. Save the `api_key` — it is shown only once.
 
 ```bash
-sqlx migrate add '<name>'   # create a new migration file
-sqlx migrate run            # apply pending migrations
-sqlx database reset         # drop + recreate + re-migrate (dev only)
+curl -s -X POST http://localhost:8080/businesses \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Acme Corp", "email": "billing@acme.com"}' | jq .
+```
+
+```json
+{
+  "business": {
+    "id": "b75d8a32-f485-4f8d-a76b-b9421653a055",
+    "name": "Acme Corp",
+    "email": "billing@acme.com",
+    "is_active": true
+  },
+  "api_key": "dodo_live_abc123.secretxyz"
+}
+```
+
+```bash
+export API_KEY="dodo_live_abc123.secretxyz"
 ```
 
 ---
 
-## Integration tests
-
-The spec requires three focused integration tests. They live in
-[`billing/tests/payment_integration_tests.rs`](billing/tests/payment_integration_tests.rs).
-
-### What each test does
-
-| # | Test name | What it verifies |
-|---|---|---|
-| 1 | `test_concurrent_pay_only_one_succeeds` | N=10 concurrent `POST /pay` for the **same invoice** — exactly one succeeds (200), the rest get 422; final state is `Paid`; exactly one `Succeeded` attempt in the DB. |
-| 2 | `test_idempotent_pay_replays_without_second_psp_call` | Replaying the same `Idempotency-Key` returns an identical response body; the PSP is called **exactly once** across both requests; only one `payment_attempts` row exists. |
-| 3 | `test_psp_timeout_invoice_not_stuck_in_processing` | When the PSP sleeps 35 s and billing's client times out at 10 s, the invoice rolls back from `Processing` → `Open` (not stuck); the attempt is marked `TimedOut`. |
-| 3b | `test_psp_network_error_invoice_returns_to_open` | PSP returns HTTP 500 → invoice rolls back to `Open`; attempt marked `Error`. |
-
-### How they work
-
-Each test:
-1. **Gets an isolated Postgres schema** via `#[sqlx::test(migrations = "../migrations")]` — no shared state between tests.
-2. **Starts an in-process mock PSP** on an ephemeral port (`127.0.0.1:0`) using actix-web — no external process needed.
-3. **Starts a real billing HTTP server** on another ephemeral port using the same `configure_routes` factory as production.
-4. **Fires real HTTP requests** via `reqwest` — including `join_all` for the concurrency test — so the assertions cover the full stack including middleware, handlers, and the DB state machine.
-
-### Running the tests
+### 2. Create a Customer
 
 ```bash
-# DATABASE_URL must point to a running Postgres instance.
+curl -s -X POST http://localhost:8080/customers \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Jane Smith",
+    "email": "jane@example.com",
+    "phone": "+1-555-0100"
+  }' | jq .
+```
+
+```json
+{
+  "id": "c727edcd-d6fa-476b-8077-5b53c3bdb0dd",
+  "business_id": "b75d8a32-f485-4f8d-a76b-b9421653a055",
+  "name": "Jane Smith",
+  "email": "jane@example.com",
+  "phone": "+1-555-0100"
+}
+```
+
+```bash
+export CUSTOMER_ID="c727edcd-d6fa-476b-8077-5b53c3bdb0dd"
+```
+
+---
+
+### 3. Create an Invoice
+
+Invoices start in `Draft` state. The server computes `total_amount_cents` from line items.
+
+```bash
+curl -s -X POST http://localhost:8080/invoices \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"customer_id\": \"$CUSTOMER_ID\",
+    \"due_date\": \"2026-12-31T00:00:00Z\",
+    \"line_items\": [
+      { \"description\": \"Pro Plan\", \"quantity\": 1, \"unit_amount_cents\": 4900 },
+      { \"description\": \"Extra Seats\", \"quantity\": 3, \"unit_amount_cents\": 500 }
+    ]
+  }" | jq .
+```
+
+```json
+{
+  "invoice": {
+    "id": "8d452e0e-00c3-4cb2-9a44-09a9f256a57a",
+    "state": "Draft",
+    "total_amount_cents": 6400
+  },
+  "line_items": [...]
+}
+```
+
+```bash
+export INVOICE_ID="8d452e0e-00c3-4cb2-9a44-09a9f256a57a"
+```
+
+#### Finalize the Invoice (Draft → Open)
+
+```bash
+curl -s -X POST http://localhost:8080/invoices/$INVOICE_ID/finalize \
+  -H "Authorization: Bearer $API_KEY" | jq .state
+# "Open"
+```
+
+---
+
+### 4. Pay the Invoice — Success
+
+```bash
+curl -s -X POST http://localhost:8080/invoices/$INVOICE_ID/pay \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: pay-$(uuidgen)" \
+  -d '{"card_token": "tok_success"}' | jq '{state: .invoice.state, status: .payment_attempt.status}'
+```
+
+```json
+{
+  "state": "Paid",
+  "status": "Succeeded"
+}
+```
+
+---
+
+### 5. Pay the Invoice — Failure (Insufficient Funds)
+
+Create a fresh invoice first (a `Paid` invoice cannot be retried), then:
+
+```bash
+curl -s -X POST http://localhost:8080/invoices/$INVOICE_ID/pay \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: pay-$(uuidgen)" \
+  -d '{"card_token": "tok_insufficient_funds"}' | jq '{state: .invoice.state, status: .payment_attempt.status, failure_code: .payment_attempt.failure_code}'
+```
+
+```json
+{
+  "state": "Open",
+  "status": "Failed",
+  "failure_code": "insufficient_funds"
+}
+```
+
+The invoice returns to `Open` and can be retried with a different card token.
+
+---
+
+## Mock PSP Card Tokens
+
+| Token                    | Result                                           |
+| ------------------------ | ------------------------------------------------ |
+| `tok_success`            | Succeeds → invoice moves to `Paid`               |
+| `tok_insufficient_funds` | Declined → invoice returns to `Open`             |
+| `tok_card_declined`      | Declined → invoice returns to `Open`             |
+| `tok_timeout`            | PSP hangs 30s; billing times out at 10s → `Open` |
+| `tok_network_error`      | PSP returns 500 → invoice returns to `Open`      |
+
+---
+
+## Integration Tests
+
+```bash
+# Requires a running Postgres instance
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 
-# Run only the integration tests (each test ~100 ms; timeout test ~10 s):
 cargo test --test payment_integration_tests -- --nocapture
-
-# Or run everything:
-cargo test
 ```
 
-> **Note on test 3 (timeout):** This test takes ~10 seconds intentionally — it lets
-> billing's 10-second PSP client timeout fire so we can assert the invoice is not
-> left in `Processing`. This is expected and correct behaviour.
-
-### What is NOT tested (and why)
-
-We do not write a test per handler (create customer, get invoice, etc.).
-Those handlers are thin wrappers around typed sqlx queries; the behaviour
-worth testing is the **payment lifecycle**, which is what tests 1–3 cover.
-The spec explicitly endorses this approach:
-
-> *"Lean on these rather than testing every handler."*
+| Test                                                  | Verifies                                                             |
+| ----------------------------------------------------- | -------------------------------------------------------------------- |
+| `test_concurrent_pay_only_one_succeeds`               | 10 concurrent `/pay` requests — exactly one succeeds, rest get `422` |
+| `test_idempotent_pay_replays_without_second_psp_call` | Same `Idempotency-Key` replays cached response; PSP called once      |
+| `test_psp_timeout_invoice_not_stuck_in_processing`    | Billing times out at 10s; invoice rolls back to `Open`               |
+| `test_psp_network_error_invoice_returns_to_open`      | PSP returns 500; invoice rolls back to `Open`                        |
 
 ---
 
-## Design notes
+## Design Documents
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for:
+| File                                | Contents                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| [`DESIGN.md`](./docs/DESIGN.md)     | Data model, state machine, payment correctness, webhook design, production gaps |
+| [`AI_USAGE.md`](./docs/AI_USAGE.md) | AI tools used, independent decisions, corrections made                          |
+| [`API_DOCS.md`](./docs/API_DOCS.md) | Full API reference with request/response examples                               |
 
-- API key storage, hashing, and revocation rationale
-- Invoice state machine diagram (Mermaid)
-- Two-phase commit pattern for PSP calls
-- Webhook signing and retry backoff schedule
-- Mock PSP token table
+---
+
+## Demo Video
+
+<!-- coming soon -->

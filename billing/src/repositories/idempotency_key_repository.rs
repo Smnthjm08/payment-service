@@ -8,7 +8,6 @@ use crate::domains::models::IdempotencyKey;
 pub struct IdempotencyKeyRepository;
 
 impl IdempotencyKeyRepository {
-
     pub async fn find_by_key(
         &self,
         pool: &PgPool,
