@@ -241,4 +241,10 @@ cargo test --test payment_integration_tests -- --nocapture
 
 ## Demo Video
 
-<!-- coming soon -->
+A complete walkthrough of the application, including successful and failed payment flows, is available in the demo video below:
+
+https://drive.google.com/file/d/1VIei_KYGgJxJuSmECK52iRtkewjbrApf/view?usp=sharing
+
+## Postman Collection
+
+The Postman collection used during the demo has also been included in this repository. It contains all the API requests required to reproduce and verify the demonstrated functionality.
